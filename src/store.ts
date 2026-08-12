@@ -1,16 +1,20 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import type { ParsedPixRow } from './csvImport'
+import { makeLocalTxid, previewTxidMatches } from './txidMatch'
 import type {
   AmortizationEntry,
   AppState,
+  Member,
+  MemberSettlement,
+  NumberRange,
   PaymentStatus,
   PixCharge,
+  PixDestination,
   PixPayment,
   Raffle,
   Sale,
 } from './types'
-import { makeLocalTxid, previewTxidMatches } from './txidMatch'
-import type { ParsedPixRow } from './csvImport'
 
 function uid() {
   return crypto.randomUUID()
@@ -23,19 +27,36 @@ function saleStatus(total: number, paid: number): PaymentStatus {
   return 'divergente'
 }
 
+function overlaps(aFrom: number, aTo: number, bFrom: number, bTo: number) {
+  return aFrom <= bTo && bFrom <= aTo
+}
+
 type Store = AppState & {
-  addRaffle: (input: Omit<Raffle, 'id' | 'createdAt'>) => void
+  addRaffle: (input: Omit<Raffle, 'id' | 'createdAt' | 'active'> & { active?: boolean }) => void
   removeRaffle: (id: string) => void
+  addMember: (input: { name: string; phone?: string; pin: string }) => { ok: true; member: Member } | { ok: false; error: string }
+  updateMember: (id: string, patch: Partial<Pick<Member, 'name' | 'phone' | 'pin' | 'active'>>) => void
+  removeMember: (id: string) => void
+  assignRange: (input: { memberId: string; raffleId: string; fromNumber: number; toNumber: number }) => {
+    ok: boolean
+    error?: string
+  }
+  removeRange: (id: string) => void
+  memberNumbers: (memberId: string, raffleId: string) => number[]
+  soldNumbers: (raffleId: string) => Set<number>
   addSale: (input: {
     raffleId: string
+    memberId: string
     buyerName: string
     buyerPhone?: string
     numbers: number[]
+    paymentMethod: 'pix' | 'dinheiro'
+    pixDestination?: PixDestination
     notes?: string
-    /** TXID ou End-to-end copiado do comprovante (Pix dinâmico do banco) */
     proofTxid?: string
     proofImageDataUrl?: string
-  }) => Sale | null
+    receivedNow?: boolean
+  }) => { ok: true; sale: Sale } | { ok: false; error: string }
   removeSale: (id: string) => void
   addPix: (input: {
     amount: number
@@ -62,18 +83,23 @@ type Store = AppState & {
     unmatchedWithTxid: number
   }
   createChargeForSale: (saleId: string, amount?: number) => { ok: true; charge: PixCharge } | { ok: false; error: string }
-  attachTxidToSale: (saleId: string, txid: string, amount?: number, proofImageDataUrl?: string) => { ok: true; charge: PixCharge } | { ok: false; error: string }
+  attachTxidToSale: (
+    saleId: string,
+    txid: string,
+    amount?: number,
+    proofImageDataUrl?: string,
+  ) => { ok: true; charge: PixCharge } | { ok: false; error: string }
   removePix: (id: string) => void
-  amortize: (saleId: string, pixPaymentId: string, amount: number, note?: string) => {
-    ok: boolean
-    error?: string
-  }
-  autoMatchSuggestions: () => Array<{
-    saleId: string
-    pixPaymentId: string
+  amortize: (saleId: string, pixPaymentId: string, amount: number, note?: string) => { ok: boolean; error?: string }
+  autoMatchSuggestions: () => Array<{ saleId: string; pixPaymentId: string; amount: number; reason: string }>
+  addMemberSettlement: (input: {
+    memberId: string
+    raffleId?: string
     amount: number
-    reason: string
-  }>
+    kind: 'dinheiro' | 'pix_vendedor'
+    note?: string
+  }) => void
+  removeMemberSettlement: (id: string) => void
   exportSnapshot: () => AppState
   importSnapshot: (data: AppState) => { ok: boolean; error?: string }
   seedDemo: () => void
@@ -82,10 +108,13 @@ type Store = AppState & {
 
 const empty: AppState = {
   raffles: [],
+  members: [],
+  numberRanges: [],
   sales: [],
   pixPayments: [],
   amortizations: [],
   pixCharges: [],
+  memberSettlements: [],
 }
 
 export const useStore = create<Store>()(
@@ -98,6 +127,8 @@ export const useStore = create<Store>()(
           raffles: [
             {
               ...input,
+              eventName: input.eventName.trim() || input.name.trim(),
+              active: input.active ?? true,
               id: uid(),
               createdAt: new Date().toISOString(),
             },
@@ -109,44 +140,149 @@ export const useStore = create<Store>()(
         set((s) => ({
           raffles: s.raffles.filter((r) => r.id !== id),
           sales: s.sales.filter((sale) => sale.raffleId !== id),
+          numberRanges: s.numberRanges.filter((r) => r.raffleId !== id),
+          pixCharges: s.pixCharges.filter((c) => !s.sales.some((sale) => sale.id === c.saleId && sale.raffleId === id)),
         })),
+
+      addMember: (input) => {
+        const name = input.name.trim()
+        const pin = input.pin.trim()
+        if (!name) return { ok: false, error: 'Informe o nome do membro.' }
+        if (pin.length < 4) return { ok: false, error: 'PIN com pelo menos 4 dígitos.' }
+        if (get().members.some((m) => m.name.toLowerCase() === name.toLowerCase())) {
+          return { ok: false, error: 'Já existe membro com esse nome.' }
+        }
+        const member: Member = {
+          id: uid(),
+          name,
+          phone: input.phone?.trim() || undefined,
+          pin,
+          active: true,
+          createdAt: new Date().toISOString(),
+        }
+        set((s) => ({ members: [member, ...s.members] }))
+        return { ok: true, member }
+      },
+
+      updateMember: (id, patch) =>
+        set((s) => ({
+          members: s.members.map((m) => (m.id === id ? { ...m, ...patch } : m)),
+        })),
+
+      removeMember: (id) =>
+        set((s) => ({
+          members: s.members.filter((m) => m.id !== id),
+          numberRanges: s.numberRanges.filter((r) => r.memberId !== id),
+          memberSettlements: s.memberSettlements.filter((x) => x.memberId !== id),
+        })),
+
+      assignRange: (input) => {
+        const raffle = get().raffles.find((r) => r.id === input.raffleId)
+        if (!raffle) return { ok: false, error: 'Rifa/evento não encontrado.' }
+        if (!get().members.some((m) => m.id === input.memberId)) return { ok: false, error: 'Membro não encontrado.' }
+        const from = Math.min(input.fromNumber, input.toNumber)
+        const to = Math.max(input.fromNumber, input.toNumber)
+        if (from < 1 || to > raffle.totalNumbers) {
+          return { ok: false, error: `Faixa deve estar entre 1 e ${raffle.totalNumbers}.` }
+        }
+        const clash = get().numberRanges.find(
+          (r) => r.raffleId === input.raffleId && overlaps(from, to, r.fromNumber, r.toNumber),
+        )
+        if (clash) {
+          const owner = get().members.find((m) => m.id === clash.memberId)?.name || 'outro membro'
+          return { ok: false, error: `Faixa cruza com ${owner} (${clash.fromNumber}-${clash.toNumber}).` }
+        }
+        const range: NumberRange = {
+          id: uid(),
+          memberId: input.memberId,
+          raffleId: input.raffleId,
+          fromNumber: from,
+          toNumber: to,
+          createdAt: new Date().toISOString(),
+        }
+        set((s) => ({ numberRanges: [range, ...s.numberRanges] }))
+        return { ok: true }
+      },
+
+      removeRange: (id) => set((s) => ({ numberRanges: s.numberRanges.filter((r) => r.id !== id) })),
+
+      memberNumbers: (memberId, raffleId) => {
+        const ranges = get().numberRanges.filter((r) => r.memberId === memberId && r.raffleId === raffleId)
+        const nums: number[] = []
+        for (const r of ranges) {
+          for (let n = r.fromNumber; n <= r.toNumber; n += 1) nums.push(n)
+        }
+        return [...new Set(nums)].sort((a, b) => a - b)
+      },
+
+      soldNumbers: (raffleId) => {
+        const set = new Set<number>()
+        for (const sale of get().sales.filter((s) => s.raffleId === raffleId)) {
+          sale.numbers.forEach((n) => set.add(n))
+        }
+        return set
+      },
 
       addSale: (input) => {
         const raffle = get().raffles.find((r) => r.id === input.raffleId)
-        if (!raffle) return null
+        if (!raffle) return { ok: false, error: 'Selecione a rifa/evento.' }
+        if (!get().members.some((m) => m.id === input.memberId && m.active)) {
+          return { ok: false, error: 'Membro inválido.' }
+        }
+        if (!input.buyerName.trim()) return { ok: false, error: 'Informe o comprador.' }
+        if (!input.numbers.length) return { ok: false, error: 'Selecione ao menos um número.' }
+        if (input.paymentMethod === 'pix' && !input.pixDestination) {
+          return { ok: false, error: 'Informe se o PIX foi para a entidade ou para o vendedor.' }
+        }
+
+        const allowed = new Set(get().memberNumbers(input.memberId, input.raffleId))
+        for (const n of input.numbers) {
+          if (!allowed.has(n)) return { ok: false, error: `Número ${n} não pertence a este membro.` }
+        }
+        const sold = get().soldNumbers(input.raffleId)
+        for (const n of input.numbers) {
+          if (sold.has(n)) return { ok: false, error: `Número ${n} já vendido.` }
+        }
+
         const totalAmount = input.numbers.length * raffle.ticketPrice
+        const receivedNow = input.receivedNow ?? input.paymentMethod === 'dinheiro'
+        const paidAmount = receivedNow ? totalAmount : 0
         const sale: Sale = {
           id: uid(),
           raffleId: input.raffleId,
+          memberId: input.memberId,
           buyerName: input.buyerName.trim(),
           buyerPhone: input.buyerPhone?.trim() || undefined,
           numbers: [...input.numbers].sort((a, b) => a - b),
           totalAmount,
-          paidAmount: 0,
-          status: 'pendente',
+          paidAmount,
+          status: saleStatus(totalAmount, paidAmount),
+          paymentMethod: input.paymentMethod,
+          pixDestination: input.paymentMethod === 'pix' ? input.pixDestination : undefined,
           notes: input.notes?.trim() || undefined,
           createdAt: new Date().toISOString(),
         }
 
         const proofTxid = input.proofTxid?.trim()
-        const charge: PixCharge | null = proofTxid
-          ? {
-              id: uid(),
-              saleId: sale.id,
-              txid: proofTxid,
-              amount: totalAmount,
-              status: 'pending',
-              createdAt: new Date().toISOString(),
-              note: 'TXID/E2E do comprovante — aguardando compensação no extrato CSV',
-              proofImageDataUrl: input.proofImageDataUrl || undefined,
-            }
-          : null
+        const charge: PixCharge | null =
+          proofTxid && input.paymentMethod === 'pix'
+            ? {
+                id: uid(),
+                saleId: sale.id,
+                txid: proofTxid,
+                amount: totalAmount,
+                status: 'pending',
+                createdAt: new Date().toISOString(),
+                note: 'TXID/E2E do comprovante — aguardando CSV',
+                proofImageDataUrl: input.proofImageDataUrl || undefined,
+              }
+            : null
 
         set((s) => ({
           sales: [sale, ...s.sales],
           pixCharges: charge ? [charge, ...s.pixCharges] : s.pixCharges,
         }))
-        return sale
+        return { ok: true, sale }
       },
 
       removeSale: (id) =>
@@ -159,6 +295,7 @@ export const useStore = create<Store>()(
           return {
             sales: s.sales.filter((sale) => sale.id !== id),
             amortizations: s.amortizations.filter((a) => a.saleId !== id),
+            pixCharges: s.pixCharges.filter((c) => c.saleId !== id),
             pixPayments: s.pixPayments.map((p) => {
               const subtract = pixAdjust.get(p.id)
               if (!subtract) return p
@@ -214,18 +351,15 @@ export const useStore = create<Store>()(
             createdAt: new Date().toISOString(),
           })
         }
-        if (created.length) {
-          set((s) => ({ pixPayments: [...created, ...s.pixPayments] }))
-        }
+        if (created.length) set((s) => ({ pixPayments: [...created, ...s.pixPayments] }))
         return { imported: created.length, skipped }
       },
 
       importCsvAndSettleByTxid: (rows) => {
         const bulk = get().addPixBulk(rows)
-        const state = get()
         const matches = previewTxidMatches(
           rows,
-          state.pixCharges.map((c) => ({
+          get().pixCharges.map((c) => ({
             id: c.id,
             saleId: c.saleId,
             txid: c.txid,
@@ -233,7 +367,6 @@ export const useStore = create<Store>()(
             status: c.status,
           })),
         )
-
         let settled = 0
         for (const match of matches) {
           const pix = get().pixPayments.find((p) => {
@@ -248,23 +381,15 @@ export const useStore = create<Store>()(
             )
           })
           if (!pix) continue
-          const result = get().amortize(
-            match.saleId,
-            pix.id,
-            match.settleAmount,
-            `Baixa automática por ${match.confidence === 'txid' ? 'TXID' : 'End-to-end'}`,
-          )
+          const result = get().amortize(match.saleId, pix.id, match.settleAmount, `Baixa automática por ${match.confidence}`)
           if (!result.ok) continue
           settled += 1
           set((s) => ({
             pixCharges: s.pixCharges.map((c) =>
-              c.id === match.chargeId
-                ? { ...c, status: 'paid' as const, paidAt: new Date().toISOString() }
-                : c,
+              c.id === match.chargeId ? { ...c, status: 'paid' as const, paidAt: new Date().toISOString() } : c,
             ),
           }))
         }
-
         const rowsWithId = rows.filter((r) => r.txid || r.endToEndId).length
         return {
           imported: bulk.imported,
@@ -280,7 +405,6 @@ export const useStore = create<Store>()(
         const open = sale.totalAmount - sale.paidAmount
         if (open <= 0.009) return { ok: false, error: 'Venda já quitada.' }
         const value = amount ?? open
-        if (!(value > 0) || value > open + 0.009) return { ok: false, error: 'Valor inválido.' }
         const charge: PixCharge = {
           id: uid(),
           saleId,
@@ -288,7 +412,6 @@ export const useStore = create<Store>()(
           amount: value,
           status: 'pending',
           createdAt: new Date().toISOString(),
-          note: 'Use este TXID na cobrança PIX / conferência do extrato',
         }
         set((s) => ({ pixCharges: [charge, ...s.pixCharges] }))
         return { ok: true, charge }
@@ -299,11 +422,11 @@ export const useStore = create<Store>()(
         if (!clean) return { ok: false, error: 'Informe o TXID.' }
         const sale = get().sales.find((s) => s.id === saleId)
         if (!sale) return { ok: false, error: 'Venda não encontrada.' }
-        const open = sale.totalAmount - sale.paidAmount
-        if (open <= 0.009) return { ok: false, error: 'Venda já quitada.' }
+        const open = Math.max(sale.totalAmount - sale.paidAmount, sale.totalAmount)
         const value = amount ?? open
-        const exists = get().pixCharges.some((c) => c.txid.toLowerCase() === clean.toLowerCase())
-        if (exists) return { ok: false, error: 'TXID já cadastrado.' }
+        if (get().pixCharges.some((c) => c.txid.toLowerCase() === clean.toLowerCase())) {
+          return { ok: false, error: 'TXID já cadastrado.' }
+        }
         const charge: PixCharge = {
           id: uid(),
           saleId,
@@ -311,8 +434,8 @@ export const useStore = create<Store>()(
           amount: value,
           status: 'pending',
           createdAt: new Date().toISOString(),
-          note: 'TXID/E2E do comprovante (Pix dinâmico do banco)',
-          proofImageDataUrl: proofImageDataUrl || undefined,
+          note: 'TXID/E2E do comprovante',
+          proofImageDataUrl,
         }
         set((s) => ({ pixCharges: [charge, ...s.pixCharges] }))
         return { ok: true, charge }
@@ -322,9 +445,7 @@ export const useStore = create<Store>()(
         set((s) => {
           const linked = s.amortizations.filter((a) => a.pixPaymentId === id)
           const saleAdjust = new Map<string, number>()
-          for (const a of linked) {
-            saleAdjust.set(a.saleId, (saleAdjust.get(a.saleId) ?? 0) + a.amount)
-          }
+          for (const a of linked) saleAdjust.set(a.saleId, (saleAdjust.get(a.saleId) ?? 0) + a.amount)
           return {
             pixPayments: s.pixPayments.filter((p) => p.id !== id),
             amortizations: s.amortizations.filter((a) => a.pixPaymentId !== id),
@@ -332,31 +453,20 @@ export const useStore = create<Store>()(
               const subtract = saleAdjust.get(sale.id)
               if (!subtract) return sale
               const paidAmount = Math.max(0, sale.paidAmount - subtract)
-              return {
-                ...sale,
-                paidAmount,
-                status: saleStatus(sale.totalAmount, paidAmount),
-              }
+              return { ...sale, paidAmount, status: saleStatus(sale.totalAmount, paidAmount) }
             }),
           }
         }),
 
       amortize: (saleId, pixPaymentId, amount, note) => {
-        const state = get()
-        const sale = state.sales.find((s) => s.id === saleId)
-        const pix = state.pixPayments.find((p) => p.id === pixPaymentId)
+        const sale = get().sales.find((s) => s.id === saleId)
+        const pix = get().pixPayments.find((p) => p.id === pixPaymentId)
         if (!sale || !pix) return { ok: false, error: 'Venda ou PIX não encontrado.' }
         if (amount <= 0) return { ok: false, error: 'Valor deve ser maior que zero.' }
-
         const saleOpen = Math.max(0, sale.totalAmount - sale.paidAmount)
         const pixOpen = Math.max(0, pix.amount - pix.allocatedAmount)
-        if (amount - saleOpen > 0.009) {
-          return { ok: false, error: `Venda só tem R$ ${saleOpen.toFixed(2)} em aberto.` }
-        }
-        if (amount - pixOpen > 0.009) {
-          return { ok: false, error: `PIX só tem R$ ${pixOpen.toFixed(2)} disponível.` }
-        }
-
+        if (amount - saleOpen > 0.009) return { ok: false, error: `Venda só tem R$ ${saleOpen.toFixed(2)} em aberto.` }
+        if (amount - pixOpen > 0.009) return { ok: false, error: `PIX só tem R$ ${pixOpen.toFixed(2)} disponível.` }
         const entry: AmortizationEntry = {
           id: uid(),
           saleId,
@@ -365,17 +475,12 @@ export const useStore = create<Store>()(
           createdAt: new Date().toISOString(),
           note: note?.trim() || undefined,
         }
-
         set((s) => ({
           amortizations: [entry, ...s.amortizations],
           sales: s.sales.map((item) => {
             if (item.id !== saleId) return item
             const paidAmount = item.paidAmount + amount
-            return {
-              ...item,
-              paidAmount,
-              status: saleStatus(item.totalAmount, paidAmount),
-            }
+            return { ...item, paidAmount, status: saleStatus(item.totalAmount, paidAmount) }
           }),
           pixPayments: s.pixPayments.map((item) => {
             if (item.id !== pixPaymentId) return item
@@ -386,38 +491,18 @@ export const useStore = create<Store>()(
             }
           }),
         }))
-
         return { ok: true }
       },
 
       autoMatchSuggestions: () => {
         const { sales, pixPayments, pixCharges } = get()
-        const openSales = sales
-          .filter((s) => s.paidAmount < s.totalAmount - 0.009)
-          .map((s) => ({
-            ...s,
-            open: s.totalAmount - s.paidAmount,
-          }))
-        const openPix = pixPayments
-          .filter((p) => p.allocatedAmount < p.amount - 0.009)
-          .map((p) => ({
-            ...p,
-            open: p.amount - p.allocatedAmount,
-          }))
-
-        const suggestions: Array<{
-          saleId: string
-          pixPaymentId: string
-          amount: number
-          reason: string
-        }> = []
+        const openSales = sales.filter((s) => s.paidAmount < s.totalAmount - 0.009)
+        const openPix = pixPayments.filter((p) => p.allocatedAmount < p.amount - 0.009)
+        const suggestions: Array<{ saleId: string; pixPaymentId: string; amount: number; reason: string }> = []
         const usedPix = new Set<string>()
         const usedSales = new Set<string>()
 
-        const pendingCharges = pixCharges.filter((c) => c.status === 'pending')
-
-        // 1) Highest confidence: TXID / end-to-end exact match via charge
-        for (const charge of pendingCharges) {
+        for (const charge of pixCharges.filter((c) => c.status === 'pending')) {
           if (usedSales.has(charge.saleId)) continue
           const sale = openSales.find((s) => s.id === charge.saleId)
           if (!sale) continue
@@ -432,192 +517,135 @@ export const useStore = create<Store>()(
           suggestions.push({
             saleId: sale.id,
             pixPaymentId: pix.id,
-            amount: Math.min(sale.open, pix.open, charge.amount),
+            amount: Math.min(sale.totalAmount - sale.paidAmount, pix.amount - pix.allocatedAmount, charge.amount),
             reason: 'TXID / End-to-end idêntico',
           })
           usedPix.add(pix.id)
           usedSales.add(sale.id)
         }
-
-        for (const sale of openSales) {
-          if (usedSales.has(sale.id)) continue
-          const name = sale.buyerName.trim().toLowerCase()
-          const exact = openPix.find(
-            (p) =>
-              !usedPix.has(p.id) &&
-              Math.abs(p.open - sale.open) < 0.01 &&
-              p.payerName.trim().toLowerCase() === name,
-          )
-          if (exact) {
-            suggestions.push({
-              saleId: sale.id,
-              pixPaymentId: exact.id,
-              amount: sale.open,
-              reason: 'Nome + valor em aberto iguais',
-            })
-            usedPix.add(exact.id)
-            usedSales.add(sale.id)
-            continue
-          }
-          const byAmount = openPix.find(
-            (p) => !usedPix.has(p.id) && Math.abs(p.open - sale.open) < 0.01,
-          )
-          if (byAmount) {
-            suggestions.push({
-              saleId: sale.id,
-              pixPaymentId: byAmount.id,
-              amount: sale.open,
-              reason: 'Valor em aberto igual',
-            })
-            usedPix.add(byAmount.id)
-            usedSales.add(sale.id)
-          }
-        }
-
         return suggestions
       },
 
+      addMemberSettlement: (input) => {
+        if (!(input.amount > 0)) return
+        const row: MemberSettlement = {
+          id: uid(),
+          memberId: input.memberId,
+          raffleId: input.raffleId,
+          amount: input.amount,
+          kind: input.kind,
+          note: input.note?.trim() || undefined,
+          createdAt: new Date().toISOString(),
+        }
+        set((s) => ({ memberSettlements: [row, ...s.memberSettlements] }))
+      },
+
+      removeMemberSettlement: (id) => set((s) => ({ memberSettlements: s.memberSettlements.filter((x) => x.id !== id) })),
+
       exportSnapshot: () => {
-        const { raffles, sales, pixPayments, amortizations, pixCharges } = get()
-        return { raffles, sales, pixPayments, amortizations, pixCharges }
+        const s = get()
+        return {
+          raffles: s.raffles,
+          members: s.members,
+          numberRanges: s.numberRanges,
+          sales: s.sales,
+          pixPayments: s.pixPayments,
+          amortizations: s.amortizations,
+          pixCharges: s.pixCharges,
+          memberSettlements: s.memberSettlements,
+        }
       },
 
       importSnapshot: (data) => {
-        if (!data || !Array.isArray(data.raffles) || !Array.isArray(data.sales) || !Array.isArray(data.pixPayments) || !Array.isArray(data.amortizations)) {
-          return { ok: false, error: 'Arquivo de backup inválido.' }
+        if (!data || !Array.isArray(data.raffles) || !Array.isArray(data.sales)) {
+          return { ok: false, error: 'Backup inválido.' }
         }
         set({
           raffles: data.raffles,
+          members: data.members || [],
+          numberRanges: data.numberRanges || [],
           sales: data.sales,
-          pixPayments: data.pixPayments,
-          amortizations: data.amortizations,
-          pixCharges: Array.isArray(data.pixCharges) ? data.pixCharges : [],
+          pixPayments: data.pixPayments || [],
+          amortizations: data.amortizations || [],
+          pixCharges: data.pixCharges || [],
+          memberSettlements: data.memberSettlements || [],
         })
         return { ok: true }
       },
 
       seedDemo: () => {
         const raffleId = uid()
+        const m1 = uid()
+        const m2 = uid()
         const saleA = uid()
-        const saleB = uid()
-        const saleC = uid()
-        const pix2 = uid()
-        const pix3 = uid()
-        const now = new Date()
-        const d = (daysAgo: number) => {
-          const x = new Date(now)
-          x.setDate(x.getDate() - daysAgo)
-          return x.toISOString()
-        }
-
+        const now = new Date().toISOString()
         set({
           raffles: [
             {
               id: raffleId,
-              name: 'Rifa Churrasco da Turma',
+              name: 'Rifa Churrasco',
+              eventName: 'Festa da Turma 2026',
               ticketPrice: 10,
               totalNumbers: 100,
-              prize: 'Kit churrasco + R$ 200',
-              createdAt: d(5),
+              prize: 'Kit churrasco',
+              active: true,
+              createdAt: now,
             },
+          ],
+          members: [
+            { id: m1, name: 'Carlos', pin: '1234', phone: '11999990001', active: true, createdAt: now },
+            { id: m2, name: 'Fernanda', pin: '5678', phone: '11999990002', active: true, createdAt: now },
+          ],
+          numberRanges: [
+            { id: uid(), memberId: m1, raffleId, fromNumber: 1, toNumber: 50, createdAt: now },
+            { id: uid(), memberId: m2, raffleId, fromNumber: 51, toNumber: 100, createdAt: now },
           ],
           sales: [
             {
               id: saleA,
               raffleId,
+              memberId: m1,
               buyerName: 'Maria Souza',
-              buyerPhone: '11999990001',
               numbers: [7, 8, 9],
               totalAmount: 30,
-              paidAmount: 0,
-              status: 'pendente',
-              createdAt: d(3),
-            },
-            {
-              id: saleB,
-              raffleId,
-              buyerName: 'João Lima',
-              buyerPhone: '11999990002',
-              numbers: [21, 22],
-              totalAmount: 20,
-              paidAmount: 10,
-              status: 'parcial',
-              createdAt: d(2),
-            },
-            {
-              id: saleC,
-              raffleId,
-              buyerName: 'Ana Paula',
-              numbers: [55],
-              totalAmount: 10,
-              paidAmount: 10,
+              paidAmount: 30,
               status: 'quitado',
-              createdAt: d(1),
+              paymentMethod: 'dinheiro',
+              createdAt: now,
             },
           ],
-          pixPayments: [
-            {
-              id: pix2,
-              amount: 10,
-              paidAt: d(1).slice(0, 10),
-              payerName: 'Joao Lima',
-              txid: 'PIX-JOAO-10',
-              allocatedAmount: 10,
-              matchedSaleId: saleB,
-              createdAt: d(1),
-            },
-            {
-              id: pix3,
-              amount: 10,
-              paidAt: d(1).slice(0, 10),
-              payerName: 'Ana Paula Costa',
-              endToEndId: 'E1234567820260811XXXX',
-              allocatedAmount: 10,
-              matchedSaleId: saleC,
-              createdAt: d(1),
-            },
-          ],
-          amortizations: [
-            {
-              id: uid(),
-              saleId: saleB,
-              pixPaymentId: pix2,
-              amount: 10,
-              createdAt: d(1),
-              note: 'Primeira parcela',
-            },
-            {
-              id: uid(),
-              saleId: saleC,
-              pixPaymentId: pix3,
-              amount: 10,
-              createdAt: d(1),
-            },
-          ],
-          pixCharges: [
-            {
-              id: uid(),
-              saleId: saleA,
-              txid: 'PIX-MARIA-30',
-              amount: 30,
-              status: 'pending',
-              createdAt: d(3),
-              note: 'Importe o CSV de exemplo na aba PIX para baixar automaticamente',
-            },
-          ],
+          pixPayments: [],
+          amortizations: [],
+          pixCharges: [],
+          memberSettlements: [],
         })
       },
 
       resetAll: () => set({ ...empty }),
     }),
     {
-      name: 'rifa-pix-v1',
+      name: 'rifa-pix-v2',
       merge: (persisted, current) => {
         const p = (persisted || {}) as Partial<AppState>
         return {
           ...current,
           ...p,
-          pixCharges: Array.isArray(p.pixCharges) ? p.pixCharges : [],
+          raffles: (p.raffles || []).map((r) => ({
+            ...r,
+            eventName: r.eventName || r.name,
+            active: r.active ?? true,
+          })),
+          members: p.members || [],
+          numberRanges: p.numberRanges || [],
+          sales: (p.sales || []).map((s) => ({
+            ...s,
+            memberId: s.memberId || '',
+            paymentMethod: s.paymentMethod || 'pix',
+          })),
+          pixPayments: p.pixPayments || [],
+          amortizations: p.amortizations || [],
+          pixCharges: p.pixCharges || [],
+          memberSettlements: p.memberSettlements || [],
         }
       },
     },

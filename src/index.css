@@ -438,6 +438,64 @@ th {
   font-size: 1.45rem;
 }
 
+.role-switch {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.35rem;
+  padding: 0.25rem;
+  border-radius: 999px;
+  background: rgba(20, 32, 28, 0.06);
+}
+
+.role-switch button {
+  border: 0;
+  background: transparent;
+  border-radius: 999px;
+  padding: 0.55rem 0.7rem;
+  font-weight: 700;
+  color: var(--ink-soft);
+}
+
+.role-switch button.active {
+  background: var(--ink);
+  color: #f5faf7;
+}
+
+.number-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(48px, 1fr));
+  gap: 0.4rem;
+  margin-top: 0.75rem;
+}
+
+.num-cell {
+  aspect-ratio: 1;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  font-weight: 800;
+  font-size: 0.85rem;
+}
+
+.num-cell.free {
+  background: rgba(15, 122, 95, 0.16);
+  color: #0a5241;
+}
+
+.num-cell.sold {
+  background: rgba(180, 35, 24, 0.16);
+  color: #8f1d14;
+  cursor: default;
+}
+
+.num-cell.selected {
+  outline: 2px solid var(--ink);
+  transform: translateY(-1px);
+}
+
+.num-cell:disabled {
+  opacity: 1;
+}
+
 .proof-thumb {
   display: block;
   width: min(100%, 280px);

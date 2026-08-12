@@ -1,12 +1,14 @@
 import { useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
-import { getAuthRecord, logout } from './auth'
+import { getAuthRecord, getSession, logout } from './auth'
 import { parsePixCsv, SAMPLE_CSV } from './csvImport'
+import { NumberGrid } from './NumberGrid'
 import { brl, formatNumbers, useStore } from './store'
 import { previewTxidMatches } from './txidMatch'
-import type { PaymentStatus } from './types'
+import type { PaymentMethod, PaymentStatus, PixDestination } from './types'
 
-type Tab = 'painel' | 'rifas' | 'vendas' | 'pix' | 'amortizacao' | 'cobrancas'
+type AdminTab = 'painel' | 'equipe' | 'eventos' | 'vendas' | 'pix' | 'txid' | 'amortizacao' | 'relatorios'
+type MemberTab = 'numeros' | 'vendas'
 
 const statusLabel: Record<PaymentStatus, string> = {
   pendente: 'Pendente',
@@ -15,265 +17,144 @@ const statusLabel: Record<PaymentStatus, string> = {
   divergente: 'Divergente',
 }
 
-function todayInput() {
-  return new Date().toISOString().slice(0, 10)
-}
-
-function parseNumbers(raw: string, max: number): { ok: true; numbers: number[] } | { ok: false; error: string } {
-  const parts = raw
-    .split(/[\s,;]+/)
-    .map((p) => p.trim())
-    .filter(Boolean)
-  if (!parts.length) return { ok: false, error: 'Informe ao menos um número.' }
-  const numbers: number[] = []
-  for (const part of parts) {
-    const n = Number(part)
-    if (!Number.isInteger(n) || n < 1 || n > max) {
-      return { ok: false, error: `Número inválido: ${part}` }
-    }
-    numbers.push(n)
-  }
-  const unique = [...new Set(numbers)]
-  if (unique.length !== numbers.length) return { ok: false, error: 'Há números repetidos na venda.' }
-  return { ok: true, numbers: unique }
-}
-
 export default function LocalApp() {
-  const [tab, setTab] = useState<Tab>('painel')
+  const session = getSession()
+  const isAdmin = session?.role === 'admin'
+  const memberId = session?.memberId || ''
+
+  const [adminTab, setAdminTab] = useState<AdminTab>('painel')
+  const [memberTab, setMemberTab] = useState<MemberTab>('numeros')
   const [toast, setToast] = useState<string | null>(null)
+  const [selectedNumbers, setSelectedNumbers] = useState<number[]>([])
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('dinheiro')
+  const [pixDestination, setPixDestination] = useState<PixDestination>('entidade')
+  const [saleRaffleId, setSaleRaffleId] = useState('')
   const [csvText, setCsvText] = useState('')
   const [importPreview, setImportPreview] = useState<ReturnType<typeof parsePixCsv> | null>(null)
-  const [proofPreview, setProofPreview] = useState<string | null>(null)
 
   const raffles = useStore((s) => s.raffles)
+  const members = useStore((s) => s.members)
+  const numberRanges = useStore((s) => s.numberRanges)
   const sales = useStore((s) => s.sales)
   const pixPayments = useStore((s) => s.pixPayments)
   const amortizations = useStore((s) => s.amortizations)
+  const pixCharges = useStore((s) => s.pixCharges)
+  const memberSettlements = useStore((s) => s.memberSettlements)
   const addRaffle = useStore((s) => s.addRaffle)
   const removeRaffle = useStore((s) => s.removeRaffle)
+  const addMember = useStore((s) => s.addMember)
+  const removeMember = useStore((s) => s.removeMember)
+  const assignRange = useStore((s) => s.assignRange)
+  const removeRange = useStore((s) => s.removeRange)
+  const memberNumbers = useStore((s) => s.memberNumbers)
+  const soldNumbers = useStore((s) => s.soldNumbers)
   const addSale = useStore((s) => s.addSale)
   const removeSale = useStore((s) => s.removeSale)
-  const addPix = useStore((s) => s.addPix)
   const importCsvAndSettleByTxid = useStore((s) => s.importCsvAndSettleByTxid)
-  const createChargeForSale = useStore((s) => s.createChargeForSale)
-  const attachTxidToSale = useStore((s) => s.attachTxidToSale)
-  const removePix = useStore((s) => s.removePix)
   const amortize = useStore((s) => s.amortize)
   const autoMatchSuggestions = useStore((s) => s.autoMatchSuggestions)
-  const exportSnapshot = useStore((s) => s.exportSnapshot)
-  const importSnapshot = useStore((s) => s.importSnapshot)
+  const addMemberSettlement = useStore((s) => s.addMemberSettlement)
   const seedDemo = useStore((s) => s.seedDemo)
   const resetAll = useStore((s) => s.resetAll)
-  const pixCharges = useStore((s) => s.pixCharges)
 
   const showToast = (msg: string) => {
     setToast(msg)
     window.setTimeout(() => setToast(null), 2800)
   }
 
-  const metrics = useMemo(() => {
-    const expected = sales.reduce((acc, s) => acc + s.totalAmount, 0)
-    const received = sales.reduce((acc, s) => acc + s.paidAmount, 0)
-    const pixOpen = pixPayments.reduce((acc, p) => acc + Math.max(0, p.amount - p.allocatedAmount), 0)
-    const openSales = expected - received
-    return { expected, received, openSales, pixOpen }
-  }, [sales, pixPayments])
+  const activeRaffles = raffles.filter((r) => r.active)
+  const currentRaffleId = saleRaffleId || activeRaffles[0]?.id || ''
+  const myNumbers = memberId && currentRaffleId ? memberNumbers(memberId, currentRaffleId) : []
+  const sold = currentRaffleId ? soldNumbers(currentRaffleId) : new Set<number>()
 
-  const suggestions = useMemo(() => autoMatchSuggestions(), [sales, pixPayments, amortizations, autoMatchSuggestions])
+  const visibleSales = useMemo(() => {
+    if (isAdmin) return sales
+    return sales.filter((s) => s.memberId === memberId)
+  }, [isAdmin, sales, memberId])
 
-  const takenNumbers = useMemo(() => {
-    const map = new Map<string, Set<number>>()
-    for (const sale of sales) {
-      const set = map.get(sale.raffleId) ?? new Set<number>()
-      sale.numbers.forEach((n) => set.add(n))
-      map.set(sale.raffleId, set)
-    }
-    return map
-  }, [sales])
-
-  const organizer = getAuthRecord()?.organizerName || 'Organizador'
-
-  const onCreateRaffle = (e: FormEvent<HTMLFormElement>) => {
-    e.preventDefault()
-    const fd = new FormData(e.currentTarget)
-    const name = String(fd.get('name') || '').trim()
-    const prize = String(fd.get('prize') || '').trim()
-    const ticketPrice = Number(fd.get('ticketPrice'))
-    const totalNumbers = Number(fd.get('totalNumbers'))
-    if (!name || !prize || !(ticketPrice > 0) || !(totalNumbers > 0)) {
-      showToast('Preencha a rifa corretamente.')
-      return
-    }
-    addRaffle({ name, prize, ticketPrice, totalNumbers })
-    e.currentTarget.reset()
-    showToast('Rifa criada.')
-  }
-
-  const onCreateSale = (e: FormEvent<HTMLFormElement>) => {
-    e.preventDefault()
-    const fd = new FormData(e.currentTarget)
-    const raffleId = String(fd.get('raffleId') || '')
-    const raffle = raffles.find((r) => r.id === raffleId)
-    if (!raffle) {
-      showToast('Selecione uma rifa.')
-      return
-    }
-    const parsed = parseNumbers(String(fd.get('numbers') || ''), raffle.totalNumbers)
-    if (!parsed.ok) {
-      showToast(parsed.error)
-      return
-    }
-    const taken = takenNumbers.get(raffleId) ?? new Set()
-    const clash = parsed.numbers.find((n) => taken.has(n))
-    if (clash !== undefined) {
-      showToast(`Número ${String(clash).padStart(2, '0')} já vendido.`)
-      return
-    }
-    const proofTxid = String(fd.get('proofTxid') || '').trim()
-    if (!proofTxid) {
-      showToast('Informe o TXID ou End-to-end do comprovante antes de salvar.')
-      return
-    }
-    const sale = addSale({
-      raffleId,
-      buyerName: String(fd.get('buyerName') || ''),
-      buyerPhone: String(fd.get('buyerPhone') || ''),
-      numbers: parsed.numbers,
-      notes: String(fd.get('notes') || ''),
-      proofTxid,
-      proofImageDataUrl: proofPreview || undefined,
-    })
-    if (!sale) {
-      showToast('Não foi possível salvar a venda.')
-      return
-    }
-    e.currentTarget.reset()
-    setProofPreview(null)
-    showToast('Venda salva com TXID do comprovante. Compensação virá no extrato CSV.')
-    setTab('cobrancas')
-  }
-
-  const onProofFile = async (file: File | null) => {
-    if (!file) {
-      setProofPreview(null)
-      return
-    }
-    if (!file.type.startsWith('image/')) {
-      showToast('Envie uma imagem (print/foto do comprovante).')
-      return
-    }
-    if (file.size > 2_500_000) {
-      showToast('Imagem grande demais (máx. ~2,5 MB).')
-      return
-    }
-    const reader = new FileReader()
-    reader.onload = () => setProofPreview(String(reader.result || ''))
-    reader.readAsDataURL(file)
-  }
-
-  const onCreatePix = (e: FormEvent<HTMLFormElement>) => {
-    e.preventDefault()
-    const fd = new FormData(e.currentTarget)
-    const amount = Number(fd.get('amount'))
-    const payerName = String(fd.get('payerName') || '').trim()
-    const paidAt = String(fd.get('paidAt') || '')
-    if (!(amount > 0) || !payerName || !paidAt) {
-      showToast('Informe pagador, data e valor do PIX.')
-      return
-    }
-    addPix({
-      amount,
-      payerName,
-      paidAt,
-      txid: String(fd.get('txid') || ''),
-      endToEndId: String(fd.get('endToEndId') || ''),
-      notes: String(fd.get('notes') || ''),
-    })
-    e.currentTarget.reset()
-    showToast('PIX lançado no extrato.')
-  }
-
-  const onAmortize = (e: FormEvent<HTMLFormElement>) => {
-    e.preventDefault()
-    const fd = new FormData(e.currentTarget)
-    const saleId = String(fd.get('saleId') || '')
-    const pixPaymentId = String(fd.get('pixPaymentId') || '')
-    const amount = Number(fd.get('amount'))
-    const note = String(fd.get('note') || '')
-    const result = amortize(saleId, pixPaymentId, amount, note)
-    if (!result.ok) {
-      showToast(result.error || 'Falha na amortização.')
-      return
-    }
-    e.currentTarget.reset()
-    showToast('Amortização aplicada.')
-  }
-
-  const applySuggestion = (saleId: string, pixPaymentId: string, amount: number) => {
-    const result = amortize(saleId, pixPaymentId, amount, 'Conferência automática')
-    showToast(result.ok ? 'Sugestão aplicada.' : result.error || 'Não foi possível aplicar.')
-  }
-
-  const raffleName = (id: string) => raffles.find((r) => r.id === id)?.name || '—'
-
-  const previewCsv = (text: string) => {
-    setCsvText(text)
-    setImportPreview(parsePixCsv(text))
-  }
-
-  const onFileCsv = async (file: File | null) => {
-    if (!file) return
-    const text = await file.text()
-    previewCsv(text)
-  }
-
-  const confirmImport = () => {
-    if (!importPreview?.rows.length) {
-      showToast('Nada para importar.')
-      return
-    }
-    const result = importCsvAndSettleByTxid(importPreview.rows)
-    showToast(
-      `Importados ${result.imported}. Baixas por TXID: ${result.settled}. Sem match: ${result.unmatchedWithTxid}. Duplicados: ${result.skipped}.`,
-    )
-    setCsvText('')
-    setImportPreview(null)
-  }
+  const suggestions = useMemo(() => autoMatchSuggestions(), [sales, pixPayments, pixCharges, amortizations, autoMatchSuggestions])
 
   const txidPreview = useMemo(() => {
     if (!importPreview?.rows.length) return []
     return previewTxidMatches(
       importPreview.rows,
-      pixCharges.map((c) => ({
-        id: c.id,
-        saleId: c.saleId,
-        txid: c.txid,
-        amount: c.amount,
-        status: c.status,
-      })),
+      pixCharges.map((c) => ({ id: c.id, saleId: c.saleId, txid: c.txid, amount: c.amount, status: c.status })),
     )
   }, [importPreview, pixCharges])
 
-  const downloadBackup = () => {
-    const blob = new Blob([JSON.stringify(exportSnapshot(), null, 2)], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `rifapix-backup-${todayInput()}.json`
-    a.click()
-    URL.revokeObjectURL(url)
-    showToast('Backup baixado.')
+  const reports = useMemo(() => {
+    return members.map((m) => {
+      const mSales = sales.filter((s) => s.memberId === m.id)
+      const soldCount = mSales.reduce((acc, s) => acc + s.numbers.length, 0)
+      const expected = mSales.reduce((acc, s) => acc + s.totalAmount, 0)
+      const received = mSales.reduce((acc, s) => acc + s.paidAmount, 0)
+      const cash = mSales.filter((s) => s.paymentMethod === 'dinheiro').reduce((acc, s) => acc + s.paidAmount, 0)
+      const pixEntidade = mSales
+        .filter((s) => s.paymentMethod === 'pix' && s.pixDestination === 'entidade')
+        .reduce((acc, s) => acc + s.paidAmount, 0)
+      const pixVendedor = mSales
+        .filter((s) => s.paymentMethod === 'pix' && s.pixDestination === 'vendedor')
+        .reduce((acc, s) => acc + s.paidAmount, 0)
+      const settledCash = memberSettlements.filter((x) => x.memberId === m.id && x.kind === 'dinheiro').reduce((a, x) => a + x.amount, 0)
+      const settledPix = memberSettlements
+        .filter((x) => x.memberId === m.id && x.kind === 'pix_vendedor')
+        .reduce((a, x) => a + x.amount, 0)
+      return {
+        member: m,
+        soldCount,
+        expected,
+        received,
+        cash,
+        pixEntidade,
+        pixVendedor,
+        cashOpen: Math.max(0, cash - settledCash),
+        pixVendedorOpen: Math.max(0, pixVendedor - settledPix),
+      }
+    })
+  }, [members, sales, memberSettlements])
+
+  const who = isAdmin ? getAuthRecord()?.organizerName || 'ADM' : session?.memberName || 'Membro'
+
+  const toggleNumber = (n: number) => {
+    setSelectedNumbers((prev) => (prev.includes(n) ? prev.filter((x) => x !== n) : [...prev, n].sort((a, b) => a - b)))
   }
 
-  const onBackupFile = async (file: File | null) => {
-    if (!file) return
-    try {
-      const data = JSON.parse(await file.text())
-      const result = importSnapshot(data)
-      showToast(result.ok ? 'Backup restaurado.' : result.error || 'Falha ao restaurar.')
-    } catch {
-      showToast('JSON inválido.')
-    }
+  const onCreateSale = (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault()
+    if (!memberId && !isAdmin) return
+    const fd = new FormData(e.currentTarget)
+    const sellerId = isAdmin ? String(fd.get('memberId') || '') : memberId
+    const raffleId = String(fd.get('raffleId') || currentRaffleId)
+    const result = addSale({
+      raffleId,
+      memberId: sellerId,
+      buyerName: String(fd.get('buyerName') || ''),
+      buyerPhone: String(fd.get('buyerPhone') || ''),
+      numbers: selectedNumbers,
+      paymentMethod,
+      pixDestination: paymentMethod === 'pix' ? pixDestination : undefined,
+      notes: String(fd.get('notes') || ''),
+      proofTxid: String(fd.get('proofTxid') || ''),
+      receivedNow: paymentMethod === 'dinheiro' || String(fd.get('receivedNow') || '') === 'sim',
+    })
+    if (!result.ok) return showToast(result.error)
+    e.currentTarget.reset()
+    setSelectedNumbers([])
+    setPaymentMethod('dinheiro')
+    showToast('Venda registrada.')
+  }
+
+  if (!session) {
+    return (
+      <div className="auth-shell">
+        <div className="panel auth-card">
+          <p>Sessão expirada.</p>
+          <button className="btn btn-primary" type="button" onClick={() => window.location.reload()}>
+            Entrar de novo
+          </button>
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -282,25 +163,38 @@ export default function LocalApp() {
         <div className="brand-block">
           <p className="brand">RifaPIX</p>
           <p>
-            Conferência de PIX e amortização · logado como <strong>{organizer}</strong>
+            {isAdmin ? 'Administrador' : 'Membro'} · <strong>{who}</strong>
           </p>
         </div>
         <div className="top-actions">
-          <nav className="nav" aria-label="Seções">
-            {(
-              [
-                ['painel', 'Painel'],
-                ['rifas', 'Rifas'],
-                ['vendas', 'Vendas'],
-                ['pix', 'PIX'],
-                ['cobrancas', 'TXID'],
-                ['amortizacao', 'Amortização'],
-              ] as const
-            ).map(([id, label]) => (
-              <button key={id} className={tab === id ? 'active' : ''} onClick={() => setTab(id)} type="button">
-                {label}
-              </button>
-            ))}
+          <nav className="nav">
+            {isAdmin
+              ? (
+                  [
+                    ['painel', 'Painel'],
+                    ['equipe', 'Equipe'],
+                    ['eventos', 'Eventos'],
+                    ['vendas', 'Vendas'],
+                    ['pix', 'PIX/CSV'],
+                    ['txid', 'TXID'],
+                    ['amortizacao', 'Baixas'],
+                    ['relatorios', 'Relatórios'],
+                  ] as const
+                ).map(([id, label]) => (
+                  <button key={id} type="button" className={adminTab === id ? 'active' : ''} onClick={() => setAdminTab(id)}>
+                    {label}
+                  </button>
+                ))
+              : (
+                  [
+                    ['numeros', 'Meus números'],
+                    ['vendas', 'Minhas vendas'],
+                  ] as const
+                ).map(([id, label]) => (
+                  <button key={id} type="button" className={memberTab === id ? 'active' : ''} onClick={() => setMemberTab(id)}>
+                    {label}
+                  </button>
+                ))}
           </nav>
           <button
             type="button"
@@ -315,311 +209,130 @@ export default function LocalApp() {
         </div>
       </header>
 
-      <section className="hero-metrics" aria-label="Indicadores">
-        <article className="metric">
-          <span>Esperado nas vendas</span>
-          <strong>{brl(metrics.expected)}</strong>
-        </article>
-        <article className="metric">
-          <span>Amortizado</span>
-          <strong>{brl(metrics.received)}</strong>
-        </article>
-        <article className="metric">
-          <span>Em aberto</span>
-          <strong>{brl(metrics.openSales)}</strong>
-        </article>
-        <article className="metric">
-          <span>PIX sem alocar</span>
-          <strong>{brl(metrics.pixOpen)}</strong>
-        </article>
-      </section>
-
-      {tab === 'painel' && (
-        <>
-          <section className="panel">
-            <div className="panel-head">
-              <div>
-                <h2>Painel de conferência</h2>
-                <p>Compare vendas, extrato PIX e aplique amortizações sugeridas.</p>
-              </div>
-              <div className="btn-row" style={{ marginTop: 0 }}>
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  onClick={() => {
-                    seedDemo()
-                    showToast('Dados de demonstração carregados.')
-                  }}
-                >
-                  Carregar demo
-                </button>
-                <button type="button" className="btn btn-secondary" onClick={downloadBackup}>
-                  Baixar backup
-                </button>
-                <label className="btn btn-secondary file-btn">
-                  Restaurar backup
-                  <input
-                    type="file"
-                    accept="application/json,.json"
-                    hidden
-                    onChange={(e) => onBackupFile(e.target.files?.[0] || null)}
-                  />
-                </label>
-                <button
-                  type="button"
-                  className="btn btn-danger"
-                  onClick={() => {
-                    resetAll()
-                    showToast('Dados limpos.')
-                  }}
-                >
-                  Limpar tudo
-                </button>
-              </div>
+      {/* MEMBER VIEW */}
+      {!isAdmin && memberTab === 'numeros' && (
+        <section className="panel">
+          <div className="panel-head">
+            <div>
+              <h2>Meus números</h2>
+              <p>
+                Verde = disponível · Vermelho = vendido. Selecione os verdes para vender.
+              </p>
             </div>
-            <div className="grid-2">
-              <div>
-                <h3>Sugestões de bate-cabelo</h3>
-                <p className="hint">Casa nome/valor em aberto entre venda e PIX livre.</p>
-                <div className="suggest" style={{ marginTop: '0.75rem' }}>
-                  {suggestions.length === 0 && <p className="empty">Nenhuma sugestão automática no momento.</p>}
-                  {suggestions.map((s) => {
-                    const sale = sales.find((x) => x.id === s.saleId)
-                    const pix = pixPayments.find((x) => x.id === s.pixPaymentId)
-                    if (!sale || !pix) return null
-                    return (
-                      <div className="suggest-item" key={`${s.saleId}-${s.pixPaymentId}`}>
-                        <div>
-                          <strong>{sale.buyerName}</strong> ← {pix.payerName}
-                          <div className="hint">
-                            {brl(s.amount)} · {s.reason}
-                          </div>
-                        </div>
-                        <button type="button" className="btn btn-primary" onClick={() => applySuggestion(s.saleId, s.pixPaymentId, s.amount)}>
-                          Amortizar
-                        </button>
-                      </div>
-                    )
-                  })}
-                </div>
-              </div>
-              <div>
-                <h3>Resumo por status</h3>
-                <div className="table-wrap" style={{ marginTop: '0.75rem' }}>
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Status</th>
-                        <th>Vendas</th>
-                        <th>Saldo aberto</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(['pendente', 'parcial', 'quitado', 'divergente'] as PaymentStatus[]).map((st) => {
-                        const rows = sales.filter((s) => s.status === st)
-                        const open = rows.reduce((acc, s) => acc + Math.max(0, s.totalAmount - s.paidAmount), 0)
-                        return (
-                          <tr key={st}>
-                            <td>
-                              <span className={`badge ${st}`}>{statusLabel[st]}</span>
-                            </td>
-                            <td>{rows.length}</td>
-                            <td>{brl(open)}</td>
-                          </tr>
-                        )
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          <section className="panel">
-            <div className="panel-head">
-              <div>
-                <h2>Últimas amortizações</h2>
-                <p>Histórico de aplicação de PIX sobre vendas.</p>
-              </div>
-            </div>
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Quando</th>
-                    <th>Comprador</th>
-                    <th>Pagador PIX</th>
-                    <th>Valor</th>
-                    <th>Obs.</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {amortizations.length === 0 && (
-                    <tr>
-                      <td colSpan={5} className="empty">
-                        Ainda sem amortizações.
-                      </td>
-                    </tr>
-                  )}
-                  {amortizations.slice(0, 8).map((a) => {
-                    const sale = sales.find((s) => s.id === a.saleId)
-                    const pix = pixPayments.find((p) => p.id === a.pixPaymentId)
-                    return (
-                      <tr key={a.id}>
-                        <td>{new Date(a.createdAt).toLocaleString('pt-BR')}</td>
-                        <td>{sale?.buyerName || '—'}</td>
-                        <td>{pix?.payerName || '—'}</td>
-                        <td>{brl(a.amount)}</td>
-                        <td>{a.note || '—'}</td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        </>
-      )}
-
-      {tab === 'rifas' && (
-        <section className="grid-2">
-          <form className="panel" onSubmit={onCreateRaffle}>
-            <div className="panel-head">
-              <div>
-                <h2>Nova rifa</h2>
-                <p>Defina preço do número e quantidade total.</p>
-              </div>
-            </div>
-            <div className="form-grid">
-              <label className="full">
-                Nome
-                <input name="name" placeholder="Ex.: Rifa da festa" required />
-              </label>
-              <label>
-                Preço do número (R$)
-                <input name="ticketPrice" type="number" min="0.01" step="0.01" required />
-              </label>
-              <label>
-                Total de números
-                <input name="totalNumbers" type="number" min="1" step="1" required />
-              </label>
-              <label className="full">
-                Prêmio
-                <input name="prize" placeholder="O que será sorteado" required />
-              </label>
-            </div>
-            <div className="btn-row">
-              <button className="btn btn-primary" type="submit">
-                Criar rifa
-              </button>
-            </div>
-          </form>
-
-          <div className="panel">
-            <div className="panel-head">
-              <div>
-                <h2>Rifas ativas</h2>
-                <p>{raffles.length} cadastrada(s).</p>
-              </div>
-            </div>
-            {raffles.length === 0 && <p className="empty">Nenhuma rifa ainda.</p>}
-            {raffles.map((r) => {
-              const sold = sales.filter((s) => s.raffleId === r.id).reduce((acc, s) => acc + s.numbers.length, 0)
-              const pct = Math.min(100, Math.round((sold / r.totalNumbers) * 100))
-              return (
-                <article key={r.id} style={{ marginBottom: '1rem' }}>
-                  <strong>{r.name}</strong>
-                  <div className="hint">
-                    {brl(r.ticketPrice)} / número · {r.totalNumbers} números · {r.prize}
-                  </div>
-                  <div className="progress" aria-label={`${pct}% vendido`}>
-                    <i style={{ width: `${pct}%` }} />
-                  </div>
-                  <div className="hint" style={{ marginTop: '0.35rem' }}>
-                    {sold}/{r.totalNumbers} vendidos ({pct}%)
-                  </div>
-                  <div className="btn-row">
-                    <button type="button" className="btn btn-danger" onClick={() => removeRaffle(r.id)}>
-                      Remover
-                    </button>
-                  </div>
-                </article>
-              )
-            })}
+            <label>
+              Evento/rifa
+              <select
+                value={currentRaffleId}
+                onChange={(e) => {
+                  setSaleRaffleId(e.target.value)
+                  setSelectedNumbers([])
+                }}
+              >
+                {activeRaffles.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.eventName} — {r.name}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
+          <NumberGrid
+            numbers={myNumbers}
+            sold={sold}
+            selected={new Set(selectedNumbers)}
+            onToggle={toggleNumber}
+          />
+          <p className="hint" style={{ marginTop: '0.75rem' }}>
+            Selecionados: {selectedNumbers.length ? formatNumbers(selectedNumbers) : 'nenhum'}
+          </p>
         </section>
       )}
 
-      {tab === 'vendas' && (
+      {!isAdmin && memberTab === 'vendas' && (
         <section className="grid-2">
           <form className="panel" onSubmit={onCreateSale}>
             <div className="panel-head">
               <div>
-                <h2>Registrar venda</h2>
-                <p>
-                  Cliente paga com <strong>Pix dinâmico do banco</strong> → você anexa o comprovante (TXID/E2E) → depois o CSV compensa.
-                </p>
+                <h2>Lançar venda</h2>
+                <p>Só números seus. TXID e observação são opcionais.</p>
               </div>
             </div>
             <div className="form-grid">
               <label className="full">
-                Rifa
-                <select name="raffleId" required defaultValue="">
-                  <option value="" disabled>
-                    Selecione
-                  </option>
-                  {raffles.map((r) => (
+                Evento/rifa
+                <select
+                  name="raffleId"
+                  required
+                  value={currentRaffleId}
+                  onChange={(e) => {
+                    setSaleRaffleId(e.target.value)
+                    setSelectedNumbers([])
+                  }}
+                >
+                  {activeRaffles.map((r) => (
                     <option key={r.id} value={r.id}>
-                      {r.name} ({brl(r.ticketPrice)})
+                      {r.eventName} — {r.name} ({brl(r.ticketPrice)})
                     </option>
                   ))}
                 </select>
               </label>
               <label>
                 Comprador
-                <input name="buyerName" required placeholder="Nome completo" />
+                <input name="buyerName" required />
               </label>
               <label>
                 WhatsApp
-                <input name="buyerPhone" placeholder="Opcional" />
+                <input name="buyerPhone" />
               </label>
               <label className="full">
-                Números
-                <input name="numbers" required placeholder="Ex.: 07, 08, 21" />
+                Forma de recebimento
+                <select
+                  value={paymentMethod}
+                  onChange={(e) => setPaymentMethod(e.target.value as PaymentMethod)}
+                  required
+                >
+                  <option value="dinheiro">Dinheiro</option>
+                  <option value="pix">PIX</option>
+                </select>
               </label>
-              <label className="full">
-                Observações
-                <textarea name="notes" placeholder="Combinado de pagamento, etc." />
-              </label>
-              <label className="full">
-                TXID ou End-to-end do comprovante
-                <input name="proofTxid" required placeholder="Cole o código do print/foto do comprovante" />
-              </label>
-              <label className="full">
-                Foto/print do comprovante (opcional)
-                <input type="file" accept="image/*" capture="environment" onChange={(e) => onProofFile(e.target.files?.[0] || null)} />
-              </label>
-              {proofPreview && (
-                <div className="full">
-                  <img src={proofPreview} alt="Comprovante" className="proof-thumb" />
-                  <button type="button" className="btn btn-ghost" onClick={() => setProofPreview(null)}>
-                    Remover imagem
-                  </button>
-                </div>
+              {paymentMethod === 'pix' && (
+                <label className="full">
+                  PIX caiu em qual conta?
+                  <select value={pixDestination} onChange={(e) => setPixDestination(e.target.value as PixDestination)} required>
+                    <option value="entidade">Conta da entidade</option>
+                    <option value="vendedor">Minha conta (vendedor)</option>
+                  </select>
+                </label>
               )}
+              {paymentMethod === 'pix' && (
+                <label className="full">
+                  Já recebeu este PIX?
+                  <select name="receivedNow" defaultValue="nao">
+                    <option value="nao">Ainda não (fica pendente)</option>
+                    <option value="sim">Sim, já caiu</option>
+                  </select>
+                </label>
+              )}
+              <label className="full">
+                TXID / End-to-end (opcional)
+                <input name="proofTxid" placeholder="Do comprovante, se tiver" />
+              </label>
+              <label className="full">
+                Observações (opcional)
+                <textarea name="notes" />
+              </label>
             </div>
+            <NumberGrid numbers={myNumbers} sold={sold} selected={new Set(selectedNumbers)} onToggle={toggleNumber} />
             <div className="btn-row">
-              <button className="btn btn-primary" type="submit" disabled={!raffles.length}>
-                Salvar venda com TXID
+              <button className="btn btn-primary" type="submit" disabled={!selectedNumbers.length}>
+                Salvar venda ({selectedNumbers.length} nº · {brl(selectedNumbers.length * (activeRaffles.find((r) => r.id === currentRaffleId)?.ticketPrice || 0))})
               </button>
             </div>
           </form>
-
           <div className="panel">
             <div className="panel-head">
               <div>
-                <h2>Vendas</h2>
-                <p>Saldo = total − amortizado via PIX.</p>
+                <h2>Minhas vendas</h2>
               </div>
             </div>
             <div className="table-wrap">
@@ -628,48 +341,23 @@ export default function LocalApp() {
                   <tr>
                     <th>Comprador</th>
                     <th>Números</th>
-                    <th>Total</th>
-                    <th>Pago</th>
+                    <th>Recebimento</th>
                     <th>Status</th>
-                    <th></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {sales.length === 0 && (
-                    <tr>
-                      <td colSpan={6} className="empty">
-                        Sem vendas.
-                      </td>
-                    </tr>
-                  )}
-                  {sales.map((s) => (
+                  {visibleSales.map((s) => (
                     <tr key={s.id}>
-                      <td>
-                        <strong>{s.buyerName}</strong>
-                        <div className="hint">{raffleName(s.raffleId)}</div>
-                      </td>
+                      <td>{s.buyerName}</td>
                       <td>{formatNumbers(s.numbers)}</td>
-                      <td>{brl(s.totalAmount)}</td>
-                      <td>{brl(s.paidAmount)}</td>
+                      <td>
+                        {s.paymentMethod === 'dinheiro' ? 'Dinheiro' : `PIX (${s.pixDestination === 'entidade' ? 'entidade' : 'vendedor'})`}
+                        <div className="hint">
+                          {brl(s.paidAmount)} / {brl(s.totalAmount)}
+                        </div>
+                      </td>
                       <td>
                         <span className={`badge ${s.status}`}>{statusLabel[s.status]}</span>
-                      </td>
-                      <td>
-                        <button
-                          type="button"
-                          className="btn btn-ghost"
-                          onClick={() => {
-                            const result = createChargeForSale(s.id)
-                            if (!result.ok) return showToast(result.error)
-                            showToast(`TXID gerado: ${result.charge.txid}`)
-                            setTab('cobrancas')
-                          }}
-                        >
-                          Gerar TXID
-                        </button>
-                        <button type="button" className="btn btn-ghost" onClick={() => removeSale(s.id)}>
-                          Excluir
-                        </button>
                       </td>
                     </tr>
                   ))}
@@ -680,418 +368,507 @@ export default function LocalApp() {
         </section>
       )}
 
-      {tab === 'pix' && (
-        <>
-          <section className="panel" style={{ marginBottom: '1rem' }}>
-            <div className="panel-head">
-              <div>
-                <h2>Importar extrato PIX (CSV)</h2>
-                <p>
-                  Se a linha tiver o mesmo <strong>TXID</strong> (ou End-to-end) de uma cobrança pendente, a venda é baixada automaticamente.
-                </p>
-              </div>
-              <div className="btn-row" style={{ marginTop: 0 }}>
-                <button type="button" className="btn btn-secondary" onClick={() => previewCsv(SAMPLE_CSV)}>
-                  Ver exemplo
-                </button>
-                <label className="btn btn-secondary file-btn">
-                  Enviar CSV
-                  <input type="file" accept=".csv,text/csv,text/plain" hidden onChange={(e) => onFileCsv(e.target.files?.[0] || null)} />
-                </label>
-              </div>
+      {/* ADMIN */}
+      {isAdmin && adminTab === 'painel' && (
+        <section className="panel">
+          <div className="panel-head">
+            <div>
+              <h2>Painel ADM</h2>
+              <p>Cadastre equipe e faixas, depois cada membro vende só os números dele.</p>
             </div>
-            <label className="full">
-              Colar CSV
-              <textarea
-                value={csvText}
-                onChange={(e) => previewCsv(e.target.value)}
-                placeholder="Data;Valor;Nome;TXID&#10;11/08/2026;30,00;Maria Souza;PIX-MARIA-30"
-              />
-            </label>
-            {importPreview && (
-              <div style={{ marginTop: '0.85rem' }}>
-                <p className="hint">
-                  Prévia: {importPreview.rows.length} crédito(s)
-                  {importPreview.errors.length ? ` · ${importPreview.errors.length} linha(s) com erro` : ''}
-                  {txidPreview.length ? ` · ${txidPreview.length} baixa(s) por TXID` : ''}
-                </p>
-                {txidPreview.length > 0 && (
-                  <div className="suggest" style={{ marginBottom: '0.75rem' }}>
-                    {txidPreview.map((m) => {
-                      const sale = sales.find((s) => s.id === m.saleId)
-                      return (
-                        <div className="suggest-item" key={`${m.chargeId}-${m.rowIndex}`}>
-                          <div>
-                            <strong>Match {m.confidence === 'txid' ? 'TXID' : 'E2E'}</strong> · {m.txid}
-                            <div className="hint">
-                              {sale?.buyerName || 'Venda'} ← {m.row.payerName} · {brl(m.settleAmount)}
-                            </div>
-                          </div>
-                          <span className="badge quitado">Alta confiança</span>
-                        </div>
-                      )
-                    })}
+            <div className="btn-row" style={{ marginTop: 0 }}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => {
+                  seedDemo()
+                  showToast('Demo: Carlos PIN 1234 (1-50), Fernanda PIN 5678 (51-100).')
+                }}
+              >
+                Carregar demo
+              </button>
+              <button type="button" className="btn btn-danger" onClick={() => { resetAll(); showToast('Dados limpos.') }}>
+                Limpar
+              </button>
+            </div>
+          </div>
+          <div className="hero-metrics">
+            <article className="metric">
+              <span>Membros</span>
+              <strong>{members.length}</strong>
+            </article>
+            <article className="metric">
+              <span>Vendas</span>
+              <strong>{sales.length}</strong>
+            </article>
+            <article className="metric">
+              <span>Esperado</span>
+              <strong>{brl(sales.reduce((a, s) => a + s.totalAmount, 0))}</strong>
+            </article>
+            <article className="metric">
+              <span>Recebido</span>
+              <strong>{brl(sales.reduce((a, s) => a + s.paidAmount, 0))}</strong>
+            </article>
+          </div>
+          <h3>Sugestões TXID</h3>
+          {suggestions.length === 0 && <p className="empty">Nenhuma sugestão agora.</p>}
+          {suggestions.map((s) => {
+            const sale = sales.find((x) => x.id === s.saleId)
+            const pix = pixPayments.find((x) => x.id === s.pixPaymentId)
+            return (
+              <div className="suggest-item" key={`${s.saleId}-${s.pixPaymentId}`}>
+                <div>
+                  <strong>{sale?.buyerName}</strong> ← {pix?.payerName}
+                  <div className="hint">
+                    {brl(s.amount)} · {s.reason}
                   </div>
-                )}
-                {importPreview.errors.slice(0, 3).map((err) => (
-                  <p className="auth-error" key={err}>
-                    {err}
-                  </p>
-                ))}
-                <div className="table-wrap">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Data</th>
-                        <th>Pagador</th>
-                        <th>Valor</th>
-                        <th>TXID</th>
-                        <th>Match</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {importPreview.rows.slice(0, 12).map((r, idx) => {
-                        const match = txidPreview.find((m) => m.rowIndex === idx)
-                        return (
-                          <tr key={`${r.paidAt}-${r.payerName}-${idx}`}>
-                            <td>{new Date(r.paidAt).toLocaleDateString('pt-BR')}</td>
-                            <td>{r.payerName}</td>
-                            <td>{brl(r.amount)}</td>
-                            <td>{r.txid || r.endToEndId || '—'}</td>
-                            <td>{match ? <span className="badge quitado">TXID</span> : <span className="badge pendente">Manual</span>}</td>
-                          </tr>
-                        )
-                      })}
-                    </tbody>
-                  </table>
                 </div>
-                <div className="btn-row">
-                  <button type="button" className="btn btn-primary" onClick={confirmImport} disabled={!importPreview.rows.length}>
-                    Importar e baixar por TXID ({txidPreview.length})
-                  </button>
-                </div>
-              </div>
-            )}
-          </section>
-
-          <section className="grid-2">
-            <form className="panel" onSubmit={onCreatePix}>
-              <div className="panel-head">
-                <div>
-                  <h2>Lançar PIX manual</h2>
-                  <p>Para um crédito avulso do extrato.</p>
-                </div>
-              </div>
-              <div className="form-grid">
-                <label>
-                  Pagador
-                  <input name="payerName" required placeholder="Nome no extrato" />
-                </label>
-                <label>
-                  Valor (R$)
-                  <input name="amount" type="number" min="0.01" step="0.01" required />
-                </label>
-                <label>
-                  Data
-                  <input name="paidAt" type="date" required defaultValue={todayInput()} />
-                </label>
-                <label>
-                  TXID
-                  <input name="txid" placeholder="Opcional" />
-                </label>
-                <label className="full">
-                  End-to-end
-                  <input name="endToEndId" placeholder="E..." />
-                </label>
-                <label className="full">
-                  Observações
-                  <textarea name="notes" />
-                </label>
-              </div>
-              <div className="btn-row">
-                <button className="btn btn-primary" type="submit">
-                  Incluir PIX
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => {
+                    const r = amortize(s.saleId, s.pixPaymentId, s.amount, 'Conferência TXID')
+                    showToast(r.ok ? 'Baixa aplicada.' : r.error || 'Erro')
+                  }}
+                >
+                  Amortizar
                 </button>
               </div>
-            </form>
-
-            <div className="panel">
-              <div className="panel-head">
-                <div>
-                  <h2>Extrato PIX</h2>
-                  <p>Livre = ainda não amortizado em vendas.</p>
-                </div>
-              </div>
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Pagador</th>
-                      <th>Data</th>
-                      <th>Valor</th>
-                      <th>Alocado</th>
-                      <th>Situação</th>
-                      <th></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {pixPayments.length === 0 && (
-                      <tr>
-                        <td colSpan={6} className="empty">
-                          Sem PIX lançados.
-                        </td>
-                      </tr>
-                    )}
-                    {pixPayments.map((p) => {
-                      const open = p.amount - p.allocatedAmount
-                      const situacao = open <= 0.009 ? 'alocado' : p.allocatedAmount > 0 ? 'parcial' : 'livre'
-                      return (
-                        <tr key={p.id}>
-                          <td>
-                            <strong>{p.payerName}</strong>
-                            <div className="hint">{p.txid || p.endToEndId || '—'}</div>
-                          </td>
-                          <td>{new Date(p.paidAt).toLocaleDateString('pt-BR')}</td>
-                          <td>{brl(p.amount)}</td>
-                          <td>{brl(p.allocatedAmount)}</td>
-                          <td>
-                            <span className={`badge ${situacao === 'livre' ? 'livre' : situacao === 'alocado' ? 'alocado' : 'parcial'}`}>
-                              {situacao === 'livre' ? 'Livre' : situacao === 'alocado' ? 'Alocado' : 'Parcial'}
-                            </span>
-                          </td>
-                          <td>
-                            <button type="button" className="btn btn-ghost" onClick={() => removePix(p.id)}>
-                              Excluir
-                            </button>
-                          </td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </section>
-        </>
+            )
+          })}
+        </section>
       )}
 
-      {tab === 'cobrancas' && (
+      {isAdmin && adminTab === 'equipe' && (
         <section className="grid-2">
           <form
             className="panel"
             onSubmit={(e) => {
               e.preventDefault()
               const fd = new FormData(e.currentTarget)
-              const result = attachTxidToSale(String(fd.get('saleId')), String(fd.get('txid')), Number(fd.get('amount') || 0) || undefined)
+              const result = addMember({
+                name: String(fd.get('name') || ''),
+                phone: String(fd.get('phone') || ''),
+                pin: String(fd.get('pin') || ''),
+              })
               if (!result.ok) return showToast(result.error)
               e.currentTarget.reset()
-              showToast(`TXID vinculado: ${result.charge.txid}`)
+              showToast(`Membro ${result.member.name} criado.`)
             }}
           >
             <div className="panel-head">
               <div>
-                <h2>Vincular TXID à venda</h2>
-                <p>Cole o TXID gerado no banco/PSP. Depois, ao importar o CSV com o mesmo TXID, a baixa é automática.</p>
+                <h2>Cadastrar membro</h2>
+                <p>PIN para o membro entrar e ver só os números dele.</p>
               </div>
             </div>
             <div className="form-grid">
-              <label className="full">
-                Venda em aberto
-                <select name="saleId" required defaultValue="">
-                  <option value="" disabled>
-                    Selecione
-                  </option>
-                  {sales
-                    .filter((s) => s.paidAmount < s.totalAmount - 0.009)
-                    .map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.buyerName} · aberto {brl(s.totalAmount - s.paidAmount)}
-                      </option>
-                    ))}
-                </select>
-              </label>
-              <label className="full">
-                TXID do banco/PSP
-                <input name="txid" required placeholder="Cole o identificador da cobrança" />
+              <label>
+                Nome
+                <input name="name" required />
               </label>
               <label>
-                Valor esperado (opcional)
-                <input name="amount" type="number" min="0.01" step="0.01" />
+                WhatsApp
+                <input name="phone" />
+              </label>
+              <label className="full">
+                PIN (mín. 4)
+                <input name="pin" required minLength={4} inputMode="numeric" />
               </label>
             </div>
             <div className="btn-row">
               <button className="btn btn-primary" type="submit">
-                Vincular TXID
+                Salvar membro
               </button>
             </div>
           </form>
 
-          <div className="panel">
+          <form
+            className="panel"
+            onSubmit={(e) => {
+              e.preventDefault()
+              const fd = new FormData(e.currentTarget)
+              const result = assignRange({
+                memberId: String(fd.get('memberId') || ''),
+                raffleId: String(fd.get('raffleId') || ''),
+                fromNumber: Number(fd.get('fromNumber')),
+                toNumber: Number(fd.get('toNumber')),
+              })
+              if (!result.ok) return showToast(result.error || 'Erro')
+              e.currentTarget.reset()
+              showToast('Faixa atribuída.')
+            }}
+          >
             <div className="panel-head">
               <div>
-                <h2>Cobranças / TXIDs</h2>
-                <p>{pixCharges.length} registro(s).</p>
+                <h2>Atribuir números (X até Y)</h2>
               </div>
             </div>
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Venda</th>
-                    <th>TXID</th>
-                    <th>Valor</th>
-                    <th>Status</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {pixCharges.length === 0 && (
-                    <tr>
-                      <td colSpan={5} className="empty">
-                        Nenhum TXID ainda. Gere na venda ou vincule manualmente.
-                      </td>
-                    </tr>
-                  )}
-                  {pixCharges.map((c) => {
-                    const sale = sales.find((s) => s.id === c.saleId)
-                    return (
-                      <tr key={c.id}>
-                        <td>
-                          {sale?.buyerName || '—'}
-                          {c.proofImageDataUrl && (
-                            <div>
-                              <img src={c.proofImageDataUrl} alt="Comprovante" className="proof-thumb-sm" />
-                            </div>
-                          )}
-                        </td>
-                        <td>
-                          <code>{c.txid}</code>
-                        </td>
-                        <td>{brl(c.amount)}</td>
-                        <td>
-                          <span className={`badge ${c.status === 'paid' ? 'quitado' : 'pendente'}`}>{c.status}</span>
-                        </td>
-                        <td>
-                          <button
-                            type="button"
-                            className="btn btn-ghost"
-                            onClick={async () => {
-                              await navigator.clipboard.writeText(c.txid)
-                              showToast('TXID copiado.')
-                            }}
-                          >
-                            Copiar
-                          </button>
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
+            <div className="form-grid">
+              <label className="full">
+                Membro
+                <select name="memberId" required defaultValue="">
+                  <option value="" disabled>
+                    Selecione
+                  </option>
+                  {members.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="full">
+                Evento/rifa
+                <select name="raffleId" required defaultValue="">
+                  <option value="" disabled>
+                    Selecione
+                  </option>
+                  {raffles.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.eventName} — {r.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                De
+                <input name="fromNumber" type="number" min={1} required />
+              </label>
+              <label>
+                Até
+                <input name="toNumber" type="number" min={1} required />
+              </label>
             </div>
+            <div className="btn-row">
+              <button className="btn btn-primary" type="submit">
+                Amarrar faixa
+              </button>
+            </div>
+          </form>
+
+          <div className="panel" style={{ gridColumn: '1 / -1' }}>
+            <h2>Membros e faixas</h2>
+            {members.map((m) => (
+              <article key={m.id} style={{ marginBottom: '1rem' }}>
+                <strong>{m.name}</strong> · PIN {m.pin}
+                <div className="hint">
+                  {numberRanges
+                    .filter((r) => r.memberId === m.id)
+                    .map((r) => {
+                      const raffle = raffles.find((x) => x.id === r.raffleId)
+                      return (
+                        <div key={r.id}>
+                          {raffle?.eventName || 'Rifa'}: {r.fromNumber}–{r.toNumber}{' '}
+                          <button type="button" className="btn btn-ghost" onClick={() => removeRange(r.id)}>
+                            remover faixa
+                          </button>
+                        </div>
+                      )
+                    })}
+                </div>
+                <button type="button" className="btn btn-danger" onClick={() => removeMember(m.id)}>
+                  Remover membro
+                </button>
+              </article>
+            ))}
           </div>
         </section>
       )}
 
-      {tab === 'amortizacao' && (
+      {isAdmin && adminTab === 'eventos' && (
         <section className="grid-2">
-          <form className="panel" onSubmit={onAmortize}>
+          <form
+            className="panel"
+            onSubmit={(e) => {
+              e.preventDefault()
+              const fd = new FormData(e.currentTarget)
+              addRaffle({
+                eventName: String(fd.get('eventName') || ''),
+                name: String(fd.get('name') || ''),
+                prize: String(fd.get('prize') || ''),
+                ticketPrice: Number(fd.get('ticketPrice')),
+                totalNumbers: Number(fd.get('totalNumbers')),
+              })
+              e.currentTarget.reset()
+              showToast('Evento/rifa criado.')
+            }}
+          >
             <div className="panel-head">
               <div>
-                <h2>Amortizar venda com PIX</h2>
-                <p>Aplique parte ou o total de um PIX livre sobre o saldo da venda.</p>
+                <h2>Novo evento / rifa</h2>
               </div>
             </div>
             <div className="form-grid">
               <label className="full">
-                Venda em aberto
-                <select name="saleId" required defaultValue="">
-                  <option value="" disabled>
-                    Selecione
-                  </option>
-                  {sales
-                    .filter((s) => s.paidAmount < s.totalAmount - 0.009)
-                    .map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.buyerName} · aberto {brl(s.totalAmount - s.paidAmount)} · nº {formatNumbers(s.numbers)}
-                      </option>
-                    ))}
-                </select>
+                Nome do evento
+                <input name="eventName" required placeholder="Ex.: Festa da Turma 2026" />
               </label>
               <label className="full">
-                PIX disponível
-                <select name="pixPaymentId" required defaultValue="">
-                  <option value="" disabled>
-                    Selecione
-                  </option>
-                  {pixPayments
-                    .filter((p) => p.allocatedAmount < p.amount - 0.009)
-                    .map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.payerName} · livre {brl(p.amount - p.allocatedAmount)} · {new Date(p.paidAt).toLocaleDateString('pt-BR')}
-                      </option>
-                    ))}
-                </select>
+                Nome da rifa
+                <input name="name" required />
               </label>
               <label>
-                Valor a amortizar
-                <input name="amount" type="number" min="0.01" step="0.01" required />
+                Preço do nº
+                <input name="ticketPrice" type="number" step="0.01" min="0.01" required />
               </label>
               <label>
-                Nota
-                <input name="note" placeholder="Ex.: 1ª parcela" />
+                Total de números
+                <input name="totalNumbers" type="number" min="1" required />
+              </label>
+              <label className="full">
+                Prêmio
+                <input name="prize" required />
               </label>
             </div>
             <div className="btn-row">
               <button className="btn btn-primary" type="submit">
-                Aplicar amortização
-              </button>
-              <button type="button" className="btn btn-secondary" onClick={() => setTab('painel')}>
-                Ver sugestões
+                Criar
               </button>
             </div>
           </form>
-
           <div className="panel">
-            <div className="panel-head">
-              <div>
-                <h2>Livro de amortizações</h2>
-                <p>{amortizations.length} lançamento(s).</p>
-              </div>
+            <h2>Eventos</h2>
+            {raffles.map((r) => (
+              <article key={r.id} style={{ marginBottom: '0.85rem' }}>
+                <strong>{r.eventName}</strong>
+                <div className="hint">
+                  {r.name} · {brl(r.ticketPrice)} · {r.totalNumbers} números · {r.prize}
+                </div>
+                <button type="button" className="btn btn-danger" onClick={() => removeRaffle(r.id)}>
+                  Remover
+                </button>
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {isAdmin && adminTab === 'vendas' && (
+        <section className="panel">
+          <div className="panel-head">
+            <div>
+              <h2>Todas as vendas</h2>
             </div>
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Data</th>
-                    <th>Venda</th>
-                    <th>PIX</th>
-                    <th>Valor</th>
+          </div>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Membro</th>
+                  <th>Comprador</th>
+                  <th>Números</th>
+                  <th>Recebimento</th>
+                  <th>Status</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {sales.map((s) => (
+                  <tr key={s.id}>
+                    <td>{members.find((m) => m.id === s.memberId)?.name || '—'}</td>
+                    <td>{s.buyerName}</td>
+                    <td>{formatNumbers(s.numbers)}</td>
+                    <td>
+                      {s.paymentMethod === 'dinheiro' ? 'Dinheiro' : `PIX/${s.pixDestination || '—'}`}
+                      <div className="hint">
+                        {brl(s.paidAmount)}/{brl(s.totalAmount)}
+                      </div>
+                    </td>
+                    <td>
+                      <span className={`badge ${s.status}`}>{statusLabel[s.status]}</span>
+                    </td>
+                    <td>
+                      <button type="button" className="btn btn-ghost" onClick={() => removeSale(s.id)}>
+                        Excluir
+                      </button>
+                    </td>
                   </tr>
-                </thead>
-                <tbody>
-                  {amortizations.length === 0 && (
-                    <tr>
-                      <td colSpan={4} className="empty">
-                        Nenhuma amortização registrada.
-                      </td>
-                    </tr>
-                  )}
-                  {amortizations.map((a) => {
-                    const sale = sales.find((s) => s.id === a.saleId)
-                    const pix = pixPayments.find((p) => p.id === a.pixPaymentId)
-                    return (
-                      <tr key={a.id}>
-                        <td>{new Date(a.createdAt).toLocaleString('pt-BR')}</td>
-                        <td>{sale?.buyerName || '—'}</td>
-                        <td>{pix?.payerName || '—'}</td>
-                        <td>{brl(a.amount)}</td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      {isAdmin && adminTab === 'pix' && (
+        <section className="panel">
+          <div className="panel-head">
+            <div>
+              <h2>Importar CSV e baixar por TXID</h2>
+              <p>Só ADM. Casa TXID/E2E do extrato com o comprovante salvo na venda.</p>
             </div>
+            <button type="button" className="btn btn-secondary" onClick={() => setImportPreview(parsePixCsv(SAMPLE_CSV))}>
+              Exemplo
+            </button>
+          </div>
+          <textarea
+            value={csvText}
+            onChange={(e) => {
+              setCsvText(e.target.value)
+              setImportPreview(parsePixCsv(e.target.value))
+            }}
+            placeholder="Cole o CSV do banco"
+          />
+          {importPreview && (
+            <>
+              <p className="hint">
+                {importPreview.rows.length} linhas · {txidPreview.length} matches TXID
+              </p>
+              <div className="btn-row">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => {
+                    const r = importCsvAndSettleByTxid(importPreview.rows)
+                    showToast(`Importados ${r.imported}. Baixas ${r.settled}.`)
+                    setCsvText('')
+                    setImportPreview(null)
+                  }}
+                >
+                  Importar e compensar
+                </button>
+              </div>
+            </>
+          )}
+        </section>
+      )}
+
+      {isAdmin && adminTab === 'txid' && (
+        <section className="panel">
+          <div className="panel-head">
+            <div>
+              <h2>TXIDs / comprovantes</h2>
+            </div>
+          </div>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Venda</th>
+                  <th>TXID</th>
+                  <th>Valor</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pixCharges.map((c) => (
+                  <tr key={c.id}>
+                    <td>{sales.find((s) => s.id === c.saleId)?.buyerName || '—'}</td>
+                    <td>
+                      <code>{c.txid}</code>
+                    </td>
+                    <td>{brl(c.amount)}</td>
+                    <td>
+                      <span className={`badge ${c.status === 'paid' ? 'quitado' : 'pendente'}`}>{c.status}</span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      {isAdmin && adminTab === 'amortizacao' && (
+        <section className="panel">
+          <div className="panel-head">
+            <div>
+              <h2>Livro de baixas</h2>
+            </div>
+          </div>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Quando</th>
+                  <th>Venda</th>
+                  <th>Valor</th>
+                  <th>Obs.</th>
+                </tr>
+              </thead>
+              <tbody>
+                {amortizations.map((a) => (
+                  <tr key={a.id}>
+                    <td>{new Date(a.createdAt).toLocaleString('pt-BR')}</td>
+                    <td>{sales.find((s) => s.id === a.saleId)?.buyerName || '—'}</td>
+                    <td>{brl(a.amount)}</td>
+                    <td>{a.note || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      {isAdmin && adminTab === 'relatorios' && (
+        <section className="panel">
+          <div className="panel-head">
+            <div>
+              <h2>Relatórios / prestação de contas</h2>
+              <p>Dinheiro e PIX na conta do vendedor ficam em aberto até registrar a entrega à entidade.</p>
+            </div>
+          </div>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Membro</th>
+                  <th>Nº vendidos</th>
+                  <th>Esperado</th>
+                  <th>Recebido</th>
+                  <th>Dinheiro c/ ele</th>
+                  <th>PIX entidade</th>
+                  <th>PIX vendedor em aberto</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {reports.map((r) => (
+                  <tr key={r.member.id}>
+                    <td>{r.member.name}</td>
+                    <td>{r.soldCount}</td>
+                    <td>{brl(r.expected)}</td>
+                    <td>{brl(r.received)}</td>
+                    <td>{brl(r.cashOpen)}</td>
+                    <td>{brl(r.pixEntidade)}</td>
+                    <td>{brl(r.pixVendedorOpen)}</td>
+                    <td>
+                      {r.cashOpen > 0 && (
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          onClick={() => {
+                            addMemberSettlement({ memberId: r.member.id, amount: r.cashOpen, kind: 'dinheiro', note: 'Prestação dinheiro' })
+                            showToast('Dinheiro quitado com a entidade.')
+                          }}
+                        >
+                          Receber dinheiro
+                        </button>
+                      )}
+                      {r.pixVendedorOpen > 0 && (
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          onClick={() => {
+                            addMemberSettlement({
+                              memberId: r.member.id,
+                              amount: r.pixVendedorOpen,
+                              kind: 'pix_vendedor',
+                              note: 'Repasse PIX vendedor',
+                            })
+                            showToast('PIX do vendedor prestado.')
+                          }}
+                        >
+                          Receber PIX vendedor
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </section>
       )}

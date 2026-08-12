@@ -1,5 +1,5 @@
 const AUTH_KEY = 'rifa-pix-auth-v1'
-const SESSION_KEY = 'rifa-pix-session-v1'
+const SESSION_KEY = 'rifa-pix-session-v2'
 
 export type AuthRecord = {
   organizerName: string
@@ -12,6 +12,9 @@ export type AuthRecord = {
 export type SessionRecord = {
   token: string
   expiresAt: number
+  role: 'admin' | 'member'
+  memberId?: string
+  memberName?: string
 }
 
 function toBase64(buffer: ArrayBuffer) {
@@ -72,23 +75,37 @@ export async function setupPassword(organizerName: string, password: string) {
     createdAt: new Date().toISOString(),
   }
   localStorage.setItem(AUTH_KEY, JSON.stringify(record))
-  await createSession()
+  await createAdminSession()
   return record
 }
 
-export async function login(password: string) {
+export async function loginAdmin(password: string) {
   const record = getAuthRecord()
   if (!record) throw new Error('Senha ainda não configurada.')
   const hash = await deriveHash(password, record.salt, record.iterations)
   if (hash !== record.hash) throw new Error('Senha incorreta.')
-  await createSession()
+  await createAdminSession()
 }
 
-async function createSession() {
+async function createAdminSession() {
   const tokenBytes = crypto.getRandomValues(new Uint8Array(24))
   const session: SessionRecord = {
     token: toBase64(tokenBytes.buffer),
     expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
+    role: 'admin',
+  }
+  sessionStorage.setItem(SESSION_KEY, JSON.stringify(session))
+}
+
+export function loginMember(memberId: string, memberName: string, pin: string, expectedPin: string) {
+  if (pin.trim() !== expectedPin.trim()) throw new Error('PIN incorreto.')
+  const tokenBytes = crypto.getRandomValues(new Uint8Array(24))
+  const session: SessionRecord = {
+    token: toBase64(tokenBytes.buffer),
+    expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
+    role: 'member',
+    memberId,
+    memberName,
   }
   sessionStorage.setItem(SESSION_KEY, JSON.stringify(session))
 }
@@ -97,23 +114,32 @@ export function logout() {
   sessionStorage.removeItem(SESSION_KEY)
 }
 
-export function isAuthenticated() {
+export function getSession(): SessionRecord | null {
   const raw = sessionStorage.getItem(SESSION_KEY)
-  if (!raw) return false
+  if (!raw) return null
   try {
     const session = JSON.parse(raw) as SessionRecord
     if (Date.now() > session.expiresAt) {
       logout()
-      return false
+      return null
     }
-    return Boolean(session.token)
+    return session
   } catch {
-    return false
+    return null
   }
 }
 
+export function isAuthenticated() {
+  return Boolean(getSession())
+}
+
+/** Compat: login antigo = admin */
+export async function login(password: string) {
+  return loginAdmin(password)
+}
+
 export async function changePassword(currentPassword: string, nextPassword: string) {
-  await login(currentPassword)
+  await loginAdmin(currentPassword)
   const record = getAuthRecord()
   if (!record) throw new Error('Conta não encontrada.')
   await setupPassword(record.organizerName, nextPassword)

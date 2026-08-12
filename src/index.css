@@ -1288,3 +1288,13 @@ button.block-card {
   gap: 0.45rem;
   color: var(--ink-soft);
 }
+
+button.linkish {
+  border: 0;
+  background: transparent;
+  color: var(--accent-deep);
+  font-weight: 800;
+  padding: 0 0 0 0.35rem;
+  text-decoration: underline;
+  min-height: auto;
+}

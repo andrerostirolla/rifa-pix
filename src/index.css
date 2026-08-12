@@ -1254,3 +1254,37 @@ button.block-card {
     bottom: calc(3.5rem + var(--safe-bottom));
   }
 }
+
+.install-btn {
+  white-space: nowrap;
+}
+
+.install-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgba(20, 32, 28, 0.45);
+  backdrop-filter: blur(4px);
+}
+
+.install-card {
+  width: min(440px, 100%);
+  display: grid;
+  gap: 0.65rem;
+}
+
+.install-card h2 {
+  margin: 0;
+  font-size: 1.35rem;
+}
+
+.install-steps {
+  margin: 0;
+  padding-left: 1.2rem;
+  display: grid;
+  gap: 0.45rem;
+  color: var(--ink-soft);
+}

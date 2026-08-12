@@ -1,0 +1,39 @@
+{
+  "name": "RifaPIX",
+  "short_name": "RifaPIX",
+  "description": "Conferência de rifas, equipe, blocos e PIX",
+  "id": "/rifa-pix/",
+  "start_url": "/rifa-pix/",
+  "scope": "/rifa-pix/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#eef5f1",
+  "theme_color": "#0f7a5f",
+  "lang": "pt-BR",
+  "icons": [
+    {
+      "src": "/rifa-pix/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/rifa-pix/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/rifa-pix/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/rifa-pix/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

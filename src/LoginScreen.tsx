@@ -19,6 +19,7 @@ import {
   saveCloudSession,
   saveOwnerWorkspaceState,
 } from './lib/workspace'
+import { InstallAppButton } from './InstallAppButton'
 import { useStore } from './store'
 
 const MEMBER_REMEMBER_KEY = 'rifa-pix-remember-member-v1'
@@ -403,6 +404,7 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
               {mode === 'login' ? 'Criar conta' : 'Já tenho conta'}
             </button>
           )}
+          <InstallAppButton />
         </div>
       </form>
     </div>

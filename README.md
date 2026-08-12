@@ -41,6 +41,7 @@ Local opcional: `cp .env.example .env` e preencha as mesmas variáveis.
 - **Membro:** login → Membro → código da equipe → Buscar membros → PIN
 - Dados sobem/descem da nuvem automaticamente (com cache local)
 - **Chat da equipe:** botão flutuante (canto inferior esquerdo) para ADM e membros falarem no mesmo workspace
+- **Atalho / instalar app:** botão **Instalar app** ou **Add atalho** (login e topo). No celular vira ícone na tela inicial; no PC, atalho/app na área de trabalho (Chrome/Edge)
 
 ## Edge Functions (PIX webhook — opcional)
 

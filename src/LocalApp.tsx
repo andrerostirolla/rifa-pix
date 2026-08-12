@@ -7,6 +7,7 @@ import { isSupabaseConfigured, supabase } from './lib/supabase'
 import { loadCloudSession, saveCloudSession } from './lib/workspace'
 import { brl, formatNumbers, useStore } from './store'
 import { TeamChat } from './TeamChat'
+import { InstallAppButton } from './InstallAppButton'
 import { previewTxidMatches } from './txidMatch'
 import type { CashDestination, PaymentMethod, PaymentStatus, PixDestination } from './types'
 
@@ -317,6 +318,7 @@ export default function LocalApp() {
                   ))}
             </nav>
           </div>
+          <InstallAppButton />
           <button
             type="button"
             className="btn btn-secondary btn-sair"

@@ -40,6 +40,8 @@ type Store = AppState & {
     prize: string
     blockCount: number
     numbersPerBlock: number
+    startDate?: string
+    drawDate?: string
     active?: boolean
   }) => { ok: true; raffle: Raffle } | { ok: false; error: string }
   removeRaffle: (id: string) => void
@@ -164,6 +166,8 @@ export const useStore = create<Store>()(
           active: input.active ?? true,
           blockCount,
           numbersPerBlock,
+          startDate: input.startDate || undefined,
+          drawDate: input.drawDate || undefined,
           createdAt: new Date().toISOString(),
         }
         const blocks: Block[] = []
@@ -233,6 +237,10 @@ export const useStore = create<Store>()(
         const block = get().blocks.find((b) => b.id === blockId)
         if (!block) return { ok: false, error: 'Bloco não encontrado.' }
         if (!get().members.some((m) => m.id === memberId && m.active)) return { ok: false, error: 'Membro inválido.' }
+        const st = get().blockStats(blockId)
+        if (st.open <= 0) {
+          return { ok: false, error: 'Esse bloco não pode ser transferido: está vendido (sem números abertos).' }
+        }
         set((s) => ({
           blocks: s.blocks.map((b) => (b.id === blockId ? { ...b, memberId } : b)),
         }))

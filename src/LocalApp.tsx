@@ -30,6 +30,9 @@ export default function LocalApp() {
   const [pixDestination, setPixDestination] = useState<PixDestination>('entidade')
   const [saleRaffleId, setSaleRaffleId] = useState('')
   const [openBlockId, setOpenBlockId] = useState<string | null>(null)
+  const [openEventId, setOpenEventId] = useState<string | null>(null)
+  const [filterEventId, setFilterEventId] = useState('')
+  const [transferBlockId, setTransferBlockId] = useState('')
   const [csvText, setCsvText] = useState('')
   const [importPreview, setImportPreview] = useState<ReturnType<typeof parsePixCsv> | null>(null)
 
@@ -525,40 +528,76 @@ export default function LocalApp() {
             onSubmit={(e) => {
               e.preventDefault()
               const fd = new FormData(e.currentTarget)
-              const result = assignBlock(String(fd.get('blockId') || ''), String(fd.get('memberId') || ''))
+              const blockId = transferBlockId || String(fd.get('blockId') || '')
+              const st = blockStats(blockId)
+              if (st.open <= 0) {
+                return showToast('Esse bloco não pode ser transferido: está vendido (sem números abertos).')
+              }
+              const result = assignBlock(blockId, String(fd.get('memberId') || ''))
               if (!result.ok) return showToast(result.error || 'Erro')
+              setTransferBlockId('')
               e.currentTarget.reset()
-              showToast('Bloco atribuído.')
+              showToast('Bloco atribuído/transferido.')
             }}
           >
             <div className="panel-head">
               <div>
                 <h2>Atribuir / transferir bloco</h2>
-                <p>Passe bloco de um membro para outro quando alguém vender mais rápido.</p>
+                <p>Azul = ainda tem números. Vermelho = vendido (não transfere).</p>
               </div>
             </div>
             <div className="form-grid">
               <label className="full">
-                Bloco
-                <select name="blockId" required defaultValue="">
-                  <option value="" disabled>
-                    Selecione
-                  </option>
-                  {blocks
-                    .slice()
-                    .sort((a, b) => a.index - b.index)
-                    .map((b) => {
-                      const owner = members.find((m) => m.id === b.memberId)?.name || 'livre'
-                      const raffle = raffles.find((r) => r.id === b.raffleId)
-                      const st = blockStats(b.id)
-                      return (
-                        <option key={b.id} value={b.id}>
-                          {raffle?.eventName || 'Evento'} · {b.label} ({b.fromNumber}–{b.toNumber}) · {owner} · {st.open} abertos
-                        </option>
-                      )
-                    })}
+                Evento
+                <select
+                  value={filterEventId || raffles[0]?.id || ''}
+                  onChange={(e) => {
+                    setFilterEventId(e.target.value)
+                    setTransferBlockId('')
+                  }}
+                >
+                  {raffles.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.eventName}
+                    </option>
+                  ))}
                 </select>
               </label>
+              <div className="full">
+                <span className="field-label">Blocos do evento</span>
+                <div className="transfer-block-list">
+                  {blocks
+                    .filter((b) => b.raffleId === (filterEventId || raffles[0]?.id))
+                    .sort((a, b) => a.index - b.index)
+                    .map((b) => {
+                      const st = blockStats(b.id)
+                      const soldOut = st.open <= 0
+                      const owner = members.find((m) => m.id === b.memberId)?.name || 'livre'
+                      return (
+                        <button
+                          key={b.id}
+                          type="button"
+                          className={`transfer-block ${soldOut ? 'sold-out' : 'has-open'} ${transferBlockId === b.id ? 'selected' : ''}`}
+                          onClick={() => {
+                            if (soldOut) {
+                              showToast('Esse bloco não pode ser transferido: está vendido (sem números abertos).')
+                              return
+                            }
+                            setTransferBlockId(b.id)
+                          }}
+                        >
+                          <strong>{b.label}</strong>
+                          <span>
+                            {b.fromNumber}–{b.toNumber} · {owner}
+                          </span>
+                          <span>{soldOut ? 'Vendido' : `${st.open} abertos`}</span>
+                        </button>
+                      )
+                    })}
+                </div>
+                <input type="hidden" name="blockId" value={transferBlockId} required={!transferBlockId ? undefined : undefined} />
+                {!transferBlockId && <p className="hint">Selecione um bloco azul acima.</p>}
+              </div>
               <label className="full">
                 Para o membro
                 <select name="memberId" required defaultValue="">
@@ -574,134 +613,234 @@ export default function LocalApp() {
               </label>
             </div>
             <div className="btn-row">
-              <button className="btn btn-primary" type="submit">
+              <button className="btn btn-primary" type="submit" disabled={!transferBlockId}>
                 Transferir / atribuir
               </button>
             </div>
           </form>
 
           <div className="panel" style={{ gridColumn: '1 / -1' }}>
-            <h2>Membros e blocos</h2>
-            {members.map((m) => {
-              const st = memberBlockStats(m.id)
-              return (
-                <article key={m.id} style={{ marginBottom: '1rem' }}>
-                  <strong>{m.name}</strong> · PIN {m.pin}
-                  <div className="hint">
-                    {st.blocks} blocos · {st.openBlocks} com aberto · {st.soldOutBlocks} esgotados · {st.openNumbers} nº livres
-                  </div>
-                  <div className="hint">
-                    {blocks
-                      .filter((b) => b.memberId === m.id)
-                      .sort((a, b) => a.index - b.index)
-                      .map((b) => {
-                        const bs = blockStats(b.id)
-                        return (
-                          <div key={b.id}>
-                            {b.label} ({b.fromNumber}–{b.toNumber}) · {bs.open} abertos{' '}
-                            <button type="button" className="btn btn-ghost" onClick={() => unassignBlock(b.id)}>
-                              liberar
-                            </button>
-                          </div>
-                        )
-                      })}
-                  </div>
-                  <button type="button" className="btn btn-danger" onClick={() => removeMember(m.id)}>
-                    Remover membro
-                  </button>
-                </article>
-              )
-            })}
+            <div className="panel-head">
+              <div>
+                <h2>Membros e eventos</h2>
+              </div>
+              <label>
+                Filtrar evento
+                <select value={filterEventId} onChange={(e) => setFilterEventId(e.target.value)}>
+                  <option value="">Todos</option>
+                  {raffles.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.eventName}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <div className="member-cards">
+              {members.map((m) => {
+                const memberBlocks = blocks.filter((b) => b.memberId === m.id && (!filterEventId || b.raffleId === filterEventId))
+                const events = [
+                  ...new Set(
+                    memberBlocks
+                      .map((b) => raffles.find((r) => r.id === b.raffleId)?.eventName)
+                      .filter(Boolean),
+                  ),
+                ] as string[]
+                const st = memberBlockStats(m.id, filterEventId || undefined)
+                return (
+                  <article key={m.id} className="member-card">
+                    <strong>{m.name}</strong>
+                    <div className="hint">PIN {m.pin}</div>
+                    <div className="hint">
+                      Eventos: {events.length ? events.join(', ') : 'nenhum bloco neste filtro'}
+                    </div>
+                    <div className="hint">
+                      {st.blocks} blocos · {st.openBlocks} com aberto · {st.soldOutBlocks} esgotados · {st.openNumbers} nº livres
+                    </div>
+                    <div className="mini-blocks">
+                      {memberBlocks
+                        .sort((a, b) => a.index - b.index)
+                        .map((b) => {
+                          const bs = blockStats(b.id)
+                          const soldOut = bs.open <= 0
+                          return (
+                            <div key={b.id} className={`mini-block ${soldOut ? 'sold-out' : 'has-open'}`}>
+                              {b.label} · {bs.open}/{bs.total}
+                              <button type="button" className="btn btn-ghost" onClick={() => unassignBlock(b.id)}>
+                                liberar
+                              </button>
+                            </div>
+                          )
+                        })}
+                    </div>
+                    <button type="button" className="btn btn-danger" onClick={() => removeMember(m.id)}>
+                      Remover membro
+                    </button>
+                  </article>
+                )
+              })}
+            </div>
           </div>
         </section>
       )}
 
       {isAdmin && adminTab === 'eventos' && (
-        <section className="grid-2">
-          <form
-            className="panel"
-            onSubmit={(e) => {
-              e.preventDefault()
-              const fd = new FormData(e.currentTarget)
-              const result = addRaffle({
-                eventName: String(fd.get('eventName') || ''),
-                name: String(fd.get('name') || ''),
-                prize: String(fd.get('prize') || ''),
-                ticketPrice: Number(fd.get('ticketPrice')),
-                blockCount: Number(fd.get('blockCount')),
-                numbersPerBlock: Number(fd.get('numbersPerBlock')),
-              })
-              if (!result.ok) return showToast(result.error)
-              e.currentTarget.reset()
-              showToast(`Evento criado com ${result.raffle.blockCount} blocos.`)
-            }}
-          >
-            <div className="panel-head">
-              <div>
-                <h2>Novo evento / rifa por blocos</h2>
-                <p>Ex.: 4 blocos × 50 cartelas = 200 números (01–50, 51–100…).</p>
-              </div>
-            </div>
-            <div className="form-grid">
-              <label className="full">
-                Nome do evento
-                <input name="eventName" required placeholder="Ex.: Festa da Turma 2026" />
-              </label>
-              <label className="full">
-                Nome da rifa
-                <input name="name" required />
-              </label>
-              <label>
-                Preço do nº
-                <input name="ticketPrice" type="number" step="0.01" min="0.01" required />
-              </label>
-              <label>
-                Qtd. de blocos
-                <input name="blockCount" type="number" min="1" required defaultValue={4} />
-              </label>
-              <label>
-                Cartelas por bloco
-                <input name="numbersPerBlock" type="number" min="1" required defaultValue={50} />
-              </label>
-              <label className="full">
-                Prêmio
-                <input name="prize" required />
-              </label>
-            </div>
-            <div className="btn-row">
-              <button className="btn btn-primary" type="submit">
-                Criar com blocos
-              </button>
-            </div>
-          </form>
-          <div className="panel">
-            <h2>Eventos e blocos</h2>
-            {raffles.map((r) => (
-              <article key={r.id} style={{ marginBottom: '0.85rem' }}>
-                <strong>{r.eventName}</strong>
-                <div className="hint">
-                  {r.name} · {brl(r.ticketPrice)} · {r.blockCount || '?'} blocos × {r.numbersPerBlock || '?'} = {r.totalNumbers} nº · {r.prize}
+        <section>
+          {!openEventId && (
+            <>
+              <form
+                className="panel"
+                style={{ marginBottom: '1rem' }}
+                onSubmit={(e) => {
+                  e.preventDefault()
+                  const fd = new FormData(e.currentTarget)
+                  const result = addRaffle({
+                    eventName: String(fd.get('eventName') || ''),
+                    name: String(fd.get('name') || ''),
+                    prize: String(fd.get('prize') || ''),
+                    ticketPrice: Number(fd.get('ticketPrice')),
+                    blockCount: Number(fd.get('blockCount')),
+                    numbersPerBlock: Number(fd.get('numbersPerBlock')),
+                    startDate: String(fd.get('startDate') || '') || undefined,
+                    drawDate: String(fd.get('drawDate') || '') || undefined,
+                  })
+                  if (!result.ok) return showToast(result.error)
+                  e.currentTarget.reset()
+                  showToast(`Evento criado com ${result.raffle.blockCount} blocos.`)
+                }}
+              >
+                <div className="panel-head">
+                  <div>
+                    <h2>Novo evento / rifa por blocos</h2>
+                    <p>Ex.: 4 blocos × 50 cartelas = 200 números.</p>
+                  </div>
                 </div>
-                <div className="hint">
-                  {blocks
-                    .filter((b) => b.raffleId === r.id)
-                    .sort((a, b) => a.index - b.index)
-                    .map((b) => {
-                      const owner = members.find((m) => m.id === b.memberId)?.name || 'livre'
+                <div className="form-grid">
+                  <label className="full">
+                    Nome do evento
+                    <input name="eventName" required placeholder="Ex.: Festa da Turma 2026" />
+                  </label>
+                  <label className="full">
+                    Nome da rifa
+                    <input name="name" required />
+                  </label>
+                  <label>
+                    Preço do nº
+                    <input name="ticketPrice" type="number" step="0.01" min="0.01" required />
+                  </label>
+                  <label>
+                    Qtd. de blocos
+                    <input name="blockCount" type="number" min="1" required defaultValue={4} />
+                  </label>
+                  <label>
+                    Cartelas por bloco
+                    <input name="numbersPerBlock" type="number" min="1" required defaultValue={50} />
+                  </label>
+                  <label>
+                    Início das vendas
+                    <input name="startDate" type="date" />
+                  </label>
+                  <label>
+                    Data do sorteio
+                    <input name="drawDate" type="date" />
+                  </label>
+                  <label className="full">
+                    Prêmios
+                    <input name="prize" required placeholder="Ex.: Moto, iPhone, TV" />
+                  </label>
+                </div>
+                <div className="btn-row">
+                  <button className="btn btn-primary" type="submit">
+                    Criar com blocos
+                  </button>
+                </div>
+              </form>
+
+              <div className="event-grid">
+                {raffles.map((r) => {
+                  const eventBlocks = blocks.filter((b) => b.raffleId === r.id)
+                  const openNums = eventBlocks.reduce((acc, b) => acc + blockStats(b.id).open, 0)
+                  return (
+                    <button key={r.id} type="button" className="event-card" onClick={() => setOpenEventId(r.id)}>
+                      <strong>{r.eventName}</strong>
+                      <span className="prize-line">{r.prize}</span>
+                      <span className="hint">
+                        {brl(r.ticketPrice)} · {r.blockCount || eventBlocks.length} blocos · {r.totalNumbers} números
+                      </span>
+                      <span className="hint">{openNums} nº ainda abertos</span>
+                      <span className="hint">Toque para abrir</span>
+                    </button>
+                  )
+                })}
+              </div>
+            </>
+          )}
+
+          {openEventId &&
+            (() => {
+              const r = raffles.find((x) => x.id === openEventId)
+              if (!r) return null
+              const eventBlocks = blocks.filter((b) => b.raffleId === r.id).sort((a, b) => a.index - b.index)
+              const openNums = eventBlocks.reduce((acc, b) => acc + blockStats(b.id).open, 0)
+              return (
+                <section className="panel">
+                  <div className="panel-head">
+                    <div>
+                      <button type="button" className="btn btn-secondary" onClick={() => setOpenEventId(null)}>
+                        ← Voltar aos eventos
+                      </button>
+                    </div>
+                    <button type="button" className="btn btn-danger" onClick={() => { removeRaffle(r.id); setOpenEventId(null) }}>
+                      Remover evento
+                    </button>
+                  </div>
+                  <header className="event-hero">
+                    <p className="event-kicker">{r.name}</p>
+                    <h2>{r.eventName}</h2>
+                    <p className="event-prize">Premiação: {r.prize}</p>
+                    <div className="event-meta">
+                      <span>
+                        <strong>Valor</strong>
+                        {brl(r.ticketPrice)} / número
+                      </span>
+                      <span>
+                        <strong>Blocos</strong>
+                        {r.blockCount || eventBlocks.length} × {r.numbersPerBlock || '—'}
+                      </span>
+                      <span>
+                        <strong>Números</strong>
+                        {r.totalNumbers} (abertos: {openNums})
+                      </span>
+                      <span>
+                        <strong>Início</strong>
+                        {r.startDate ? new Date(r.startDate).toLocaleDateString('pt-BR') : '—'}
+                      </span>
+                      <span>
+                        <strong>Sorteio</strong>
+                        {r.drawDate ? new Date(r.drawDate).toLocaleDateString('pt-BR') : '—'}
+                      </span>
+                    </div>
+                  </header>
+                  <div className="block-grid">
+                    {eventBlocks.map((b) => {
                       const st = blockStats(b.id)
+                      const soldOut = st.open <= 0
+                      const owner = members.find((m) => m.id === b.memberId)?.name || 'livre'
                       return (
-                        <div key={b.id}>
-                          {b.label}: {b.fromNumber}–{b.toNumber} · {owner} · {st.open} abertos
+                        <div key={b.id} className={`block-card ${soldOut ? 'sold-out' : 'has-open'}`}>
+                          <strong>{b.label}</strong>
+                          <span className="hint">
+                            nº {b.fromNumber}–{b.toNumber}
+                          </span>
+                          <span className="block-open">{soldOut ? 'Vendido' : `${st.open} abertos`}</span>
+                          <span className="hint">{owner}</span>
                         </div>
                       )
                     })}
-                </div>
-                <button type="button" className="btn btn-danger" onClick={() => removeRaffle(r.id)}>
-                  Remover
-                </button>
-              </article>
-            ))}
-          </div>
+                  </div>
+                </section>
+              )
+            })()}
         </section>
       )}
 

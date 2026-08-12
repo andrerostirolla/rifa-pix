@@ -16,6 +16,10 @@ export interface Raffle {
   blockCount?: number
   /** Números/cartelas por bloco (ex.: 50) */
   numbersPerBlock?: number
+  /** Data de início das vendas (yyyy-mm-dd) */
+  startDate?: string
+  /** Data do sorteio (yyyy-mm-dd) */
+  drawDate?: string
 }
 
 export interface Member {

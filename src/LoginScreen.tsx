@@ -1,12 +1,30 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { getAuthRecord, hasPasswordSetup, loginAdmin, loginMember, setupPassword } from './auth'
 import { isSupabaseConfigured } from './lib/supabase'
 import { useAuth } from './lib/useAuth'
 import { useStore } from './store'
 
+const MEMBER_REMEMBER_KEY = 'rifa-pix-remember-member-v1'
+
+type RememberedMember = {
+  memberId: string
+  memberName: string
+  pin?: string
+  rememberPin: boolean
+}
+
 type Props = {
   onLocalAuthenticated: () => void
+}
+
+function loadRemembered(): RememberedMember | null {
+  try {
+    const raw = localStorage.getItem(MEMBER_REMEMBER_KEY)
+    return raw ? (JSON.parse(raw) as RememberedMember) : null
+  } catch {
+    return null
+  }
 }
 
 export function LoginScreen({ onLocalAuthenticated }: Props) {
@@ -14,11 +32,23 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
   const members = useStore((s) => s.members)
   const existing = getAuthRecord()
   const isLocalSetup = !hasPasswordSetup()
+  const remembered = loadRemembered()
   const [mode, setMode] = useState<'login' | 'signup'>('login')
-  const [localRole, setLocalRole] = useState<'admin' | 'member'>('admin')
+  const [localRole, setLocalRole] = useState<'admin' | 'member'>(remembered ? 'member' : 'admin')
+  const [memberId, setMemberId] = useState(remembered?.memberId || '')
+  const [pin, setPin] = useState(remembered?.rememberPin ? remembered.pin || '' : '')
+  const [rememberPin, setRememberPin] = useState(Boolean(remembered?.rememberPin))
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [info, setInfo] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (remembered?.memberId && members.some((m) => m.id === remembered.memberId)) {
+      setLocalRole('member')
+      setMemberId(remembered.memberId)
+      if (remembered.rememberPin && remembered.pin) setPin(remembered.pin)
+    }
+  }, [members, remembered?.memberId, remembered?.pin, remembered?.rememberPin])
 
   const onSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault()
@@ -48,10 +78,18 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
         await loginAdmin(String(fd.get('password') || ''))
         onLocalAuthenticated()
       } else {
-        const memberId = String(fd.get('memberId') || '')
-        const member = members.find((m) => m.id === memberId && m.active)
+        const selectedId = memberId || String(fd.get('memberId') || '')
+        const member = members.find((m) => m.id === selectedId && m.active)
         if (!member) throw new Error('Selecione o membro.')
-        loginMember(member.id, member.name, String(fd.get('pin') || ''), member.pin)
+        const usedPin = pin || String(fd.get('pin') || '')
+        loginMember(member.id, member.name, usedPin, member.pin)
+        const payload: RememberedMember = {
+          memberId: member.id,
+          memberName: member.name,
+          rememberPin,
+          pin: rememberPin ? usedPin : undefined,
+        }
+        localStorage.setItem(MEMBER_REMEMBER_KEY, JSON.stringify(payload))
         onLocalAuthenticated()
       }
     } catch (err) {
@@ -74,7 +112,7 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
 
   return (
     <div className="auth-shell">
-      <form className="auth-card panel" onSubmit={onSubmit}>
+      <form className="auth-card panel" onSubmit={onSubmit} autoComplete="on">
         <p className="brand">RifaPIX</p>
         <h1>{isSupabaseConfigured ? (mode === 'signup' ? 'Criar conta' : 'Entrar') : isLocalSetup ? 'Criar ADM' : 'Entrar'}</h1>
         <p className="hint">
@@ -82,7 +120,7 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
             ? 'Modo nuvem (Supabase).'
             : isLocalSetup
               ? 'Primeiro acesso: defina a senha do administrador.'
-              : 'ADM vê tudo. Membro vê só seus números e vendas.'}
+              : 'ADM vê tudo. Membro vê só seus blocos e vendas.'}
         </p>
 
         {!isSupabaseConfigured && !isLocalSetup && (
@@ -106,26 +144,26 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
             )}
             <label>
               E-mail
-              <input name="email" type="email" required autoComplete="email" />
+              <input name="email" type="email" required autoComplete="username" />
             </label>
             <label>
               Senha
-              <input name="password" type="password" required minLength={6} />
+              <input name="password" type="password" required minLength={6} autoComplete="current-password" />
             </label>
           </>
         ) : isLocalSetup ? (
           <>
             <label>
               Nome do administrador
-              <input name="organizerName" required placeholder="Seu nome" />
+              <input name="organizerName" required placeholder="Seu nome" autoComplete="username" />
             </label>
             <label>
               Senha ADM
-              <input name="password" type="password" required minLength={4} />
+              <input name="password" type="password" required minLength={4} autoComplete="new-password" />
             </label>
             <label>
               Confirmar senha
-              <input name="confirm" type="password" required minLength={4} />
+              <input name="confirm" type="password" required minLength={4} autoComplete="new-password" />
             </label>
           </>
         ) : localRole === 'admin' ? (
@@ -137,7 +175,13 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
           <>
             <label>
               Membro
-              <select name="memberId" required defaultValue="">
+              <select
+                name="memberId"
+                required
+                value={memberId}
+                onChange={(e) => setMemberId(e.target.value)}
+                autoComplete="username"
+              >
                 <option value="" disabled>
                   Selecione
                 </option>
@@ -150,10 +194,30 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
                   ))}
               </select>
             </label>
+            {remembered?.memberName && memberId === remembered.memberId && (
+              <p className="hint">Último acesso: <strong>{remembered.memberName}</strong></p>
+            )}
             <label>
               PIN
-              <input name="pin" type="password" inputMode="numeric" required minLength={4} placeholder="PIN do membro" />
+              <input
+                name="pin"
+                type="password"
+                inputMode="numeric"
+                required
+                minLength={4}
+                placeholder="PIN do membro"
+                value={pin}
+                onChange={(e) => setPin(e.target.value)}
+                autoComplete="current-password"
+              />
             </label>
+            <label className="check-row">
+              <input type="checkbox" checked={rememberPin} onChange={(e) => setRememberPin(e.target.checked)} />
+              Lembrar PIN neste aparelho (Face ID / chaveiro do celular pode preencher também)
+            </label>
+            <p className="hint">
+              No iPhone/Android, aceite salvar a senha no navegador para desbloquear com Face ID / biometria.
+            </p>
             {!members.filter((m) => m.active).length && (
               <p className="hint">Nenhum membro cadastrado. Entre como ADM e cadastre na aba Equipe.</p>
             )}

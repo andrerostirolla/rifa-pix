@@ -105,7 +105,6 @@ export default function LocalApp() {
   const blockStats = useStore((s) => s.blockStats)
   const memberBlockStats = useStore((s) => s.memberBlockStats)
   const addSale = useStore((s) => s.addSale)
-  const removeSale = useStore((s) => s.removeSale)
   const importCsvAndSettleByTxid = useStore((s) => s.importCsvAndSettleByTxid)
   const amortize = useStore((s) => s.amortize)
   const autoMatchSuggestions = useStore((s) => s.autoMatchSuggestions)
@@ -1137,7 +1136,7 @@ export default function LocalApp() {
                   <th>Números</th>
                   <th>Recebimento</th>
                   <th>Status</th>
-                  <th></th>
+                  <th>Comprovante</th>
                 </tr>
               </thead>
               <tbody>
@@ -1158,7 +1157,7 @@ export default function LocalApp() {
                       <span className={`badge ${s.status}`}>{statusLabel[s.status]}</span>
                     </td>
                     <td>
-                      {(s.proofImageDataUrl || pixCharges.find((c) => c.saleId === s.id)?.proofImageDataUrl) && (
+                      {(s.proofImageDataUrl || pixCharges.find((c) => c.saleId === s.id)?.proofImageDataUrl) ? (
                         <button
                           type="button"
                           className="btn-proof"
@@ -1173,10 +1172,9 @@ export default function LocalApp() {
                         >
                           <ProofIcon />
                         </button>
+                      ) : (
+                        '—'
                       )}
-                      <button type="button" className="btn btn-ghost" onClick={() => removeSale(s.id)}>
-                        Excluir
-                      </button>
                     </td>
                   </tr>
                 ))}
@@ -1266,33 +1264,83 @@ export default function LocalApp() {
       )}
 
       {isAdmin && adminTab === 'amortizacao' && (
-        <section className="panel">
-          <div className="panel-head">
-            <div>
-              <h2>Livro de baixas</h2>
+        <section className="reports-stack">
+          <div className="panel">
+            <div className="panel-head">
+              <div>
+                <h2>Prestações / fechamentos com membros</h2>
+                <p>Registros de “Receber dinheiro” e “Receber PIX vendedor” feitos em Relatórios.</p>
+              </div>
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Quando</th>
+                    <th>Membro</th>
+                    <th>Tipo</th>
+                    <th>Valor</th>
+                    <th>Obs.</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {memberSettlements.length === 0 && (
+                    <tr>
+                      <td colSpan={5}>
+                        <p className="empty">Nenhuma prestação registrada ainda.</p>
+                      </td>
+                    </tr>
+                  )}
+                  {memberSettlements.map((row) => (
+                    <tr key={row.id}>
+                      <td>{new Date(row.createdAt).toLocaleString('pt-BR')}</td>
+                      <td>{members.find((m) => m.id === row.memberId)?.name || '—'}</td>
+                      <td>{row.kind === 'dinheiro' ? 'Dinheiro' : 'PIX vendedor'}</td>
+                      <td>{brl(row.amount)}</td>
+                      <td>{row.note || '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </div>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Quando</th>
-                  <th>Venda</th>
-                  <th>Valor</th>
-                  <th>Obs.</th>
-                </tr>
-              </thead>
-              <tbody>
-                {amortizations.map((a) => (
-                  <tr key={a.id}>
-                    <td>{new Date(a.createdAt).toLocaleString('pt-BR')}</td>
-                    <td>{sales.find((s) => s.id === a.saleId)?.buyerName || '—'}</td>
-                    <td>{brl(a.amount)}</td>
-                    <td>{a.note || '—'}</td>
+
+          <div className="panel">
+            <div className="panel-head">
+              <div>
+                <h2>Baixas de PIX (amortização por venda)</h2>
+                <p>Quando um PIX do extrato/CSV é aplicado em uma venda específica.</p>
+              </div>
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Quando</th>
+                    <th>Venda</th>
+                    <th>Valor</th>
+                    <th>Obs.</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {amortizations.length === 0 && (
+                    <tr>
+                      <td colSpan={4}>
+                        <p className="empty">Nenhuma amortização de PIX ainda.</p>
+                      </td>
+                    </tr>
+                  )}
+                  {amortizations.map((a) => (
+                    <tr key={a.id}>
+                      <td>{new Date(a.createdAt).toLocaleString('pt-BR')}</td>
+                      <td>{sales.find((s) => s.id === a.saleId)?.buyerName || '—'}</td>
+                      <td>{brl(a.amount)}</td>
+                      <td>{a.note || '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
         </section>
       )}

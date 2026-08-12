@@ -49,13 +49,14 @@ Body mínimo:
 }
 ```
 
-## Fluxo de baixa automática
+## Baixa por TXID via CSV (recomendado sem webhook)
 
-1. Crie rifa + venda no app (modo nuvem)
-2. Clique **Gerar PIX** (cria cobrança com `txid` único)
-3. Cliente paga o PIX
-4. PSP chama o webhook → sistema cria `pix_payments` e amortiza a venda
-5. Enquanto o PSP não está ligado, use **Simular pagamento** na aba Cobranças
+1. Na venda, clique **Gerar TXID** (ou vincule o TXID do seu banco na aba TXID/Cobranças)
+2. Exporte o extrato PIX em CSV com coluna `TXID` (ou End-to-end)
+3. Importe na aba PIX → o sistema mostra os matches de **alta confiança**
+4. Confirme: as vendas com TXID idêntico são baixadas automaticamente
+
+Isso é mais assertivo que casar só por nome/valor.
 
 ## Rodar local
 

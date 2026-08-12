@@ -3,9 +3,10 @@ import type { FormEvent } from 'react'
 import { getAuthRecord, logout } from './auth'
 import { parsePixCsv, SAMPLE_CSV } from './csvImport'
 import { brl, formatNumbers, useStore } from './store'
+import { previewTxidMatches } from './txidMatch'
 import type { PaymentStatus } from './types'
 
-type Tab = 'painel' | 'rifas' | 'vendas' | 'pix' | 'amortizacao'
+type Tab = 'painel' | 'rifas' | 'vendas' | 'pix' | 'amortizacao' | 'cobrancas'
 
 const statusLabel: Record<PaymentStatus, string> = {
   pendente: 'Pendente',
@@ -52,7 +53,9 @@ export default function LocalApp() {
   const addSale = useStore((s) => s.addSale)
   const removeSale = useStore((s) => s.removeSale)
   const addPix = useStore((s) => s.addPix)
-  const addPixBulk = useStore((s) => s.addPixBulk)
+  const importCsvAndSettleByTxid = useStore((s) => s.importCsvAndSettleByTxid)
+  const createChargeForSale = useStore((s) => s.createChargeForSale)
+  const attachTxidToSale = useStore((s) => s.attachTxidToSale)
   const removePix = useStore((s) => s.removePix)
   const amortize = useStore((s) => s.amortize)
   const autoMatchSuggestions = useStore((s) => s.autoMatchSuggestions)
@@ -60,6 +63,7 @@ export default function LocalApp() {
   const importSnapshot = useStore((s) => s.importSnapshot)
   const seedDemo = useStore((s) => s.seedDemo)
   const resetAll = useStore((s) => s.resetAll)
+  const pixCharges = useStore((s) => s.pixCharges)
 
   const showToast = (msg: string) => {
     setToast(msg)
@@ -196,11 +200,27 @@ export default function LocalApp() {
       showToast('Nada para importar.')
       return
     }
-    const result = addPixBulk(importPreview.rows)
-    showToast(`Importados ${result.imported}. Ignorados (duplicados): ${result.skipped}.`)
+    const result = importCsvAndSettleByTxid(importPreview.rows)
+    showToast(
+      `Importados ${result.imported}. Baixas por TXID: ${result.settled}. Sem match: ${result.unmatchedWithTxid}. Duplicados: ${result.skipped}.`,
+    )
     setCsvText('')
     setImportPreview(null)
   }
+
+  const txidPreview = useMemo(() => {
+    if (!importPreview?.rows.length) return []
+    return previewTxidMatches(
+      importPreview.rows,
+      pixCharges.map((c) => ({
+        id: c.id,
+        saleId: c.saleId,
+        txid: c.txid,
+        amount: c.amount,
+        status: c.status,
+      })),
+    )
+  }, [importPreview, pixCharges])
 
   const downloadBackup = () => {
     const blob = new Blob([JSON.stringify(exportSnapshot(), null, 2)], { type: 'application/json' })
@@ -241,6 +261,7 @@ export default function LocalApp() {
                 ['rifas', 'Rifas'],
                 ['vendas', 'Vendas'],
                 ['pix', 'PIX'],
+                ['cobrancas', 'TXID'],
                 ['amortizacao', 'Amortização'],
               ] as const
             ).map(([id, label]) => (
@@ -584,6 +605,18 @@ export default function LocalApp() {
                         <span className={`badge ${s.status}`}>{statusLabel[s.status]}</span>
                       </td>
                       <td>
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          onClick={() => {
+                            const result = createChargeForSale(s.id)
+                            if (!result.ok) return showToast(result.error)
+                            showToast(`TXID gerado: ${result.charge.txid}`)
+                            setTab('cobrancas')
+                          }}
+                        >
+                          Gerar TXID
+                        </button>
                         <button type="button" className="btn btn-ghost" onClick={() => removeSale(s.id)}>
                           Excluir
                         </button>
@@ -603,7 +636,9 @@ export default function LocalApp() {
             <div className="panel-head">
               <div>
                 <h2>Importar extrato PIX (CSV)</h2>
-                <p>Cabeçalhos reconhecidos: Data, Valor, Nome/Pagador/Descrição, TXID, End-to-end.</p>
+                <p>
+                  Se a linha tiver o mesmo <strong>TXID</strong> (ou End-to-end) de uma cobrança pendente, a venda é baixada automaticamente.
+                </p>
               </div>
               <div className="btn-row" style={{ marginTop: 0 }}>
                 <button type="button" className="btn btn-secondary" onClick={() => previewCsv(SAMPLE_CSV)}>
@@ -620,7 +655,7 @@ export default function LocalApp() {
               <textarea
                 value={csvText}
                 onChange={(e) => previewCsv(e.target.value)}
-                placeholder="Data;Valor;Nome;TXID&#10;11/08/2026;30,00;Maria Souza;ABC"
+                placeholder="Data;Valor;Nome;TXID&#10;11/08/2026;30,00;Maria Souza;PIX-MARIA-30"
               />
             </label>
             {importPreview && (
@@ -628,7 +663,26 @@ export default function LocalApp() {
                 <p className="hint">
                   Prévia: {importPreview.rows.length} crédito(s)
                   {importPreview.errors.length ? ` · ${importPreview.errors.length} linha(s) com erro` : ''}
+                  {txidPreview.length ? ` · ${txidPreview.length} baixa(s) por TXID` : ''}
                 </p>
+                {txidPreview.length > 0 && (
+                  <div className="suggest" style={{ marginBottom: '0.75rem' }}>
+                    {txidPreview.map((m) => {
+                      const sale = sales.find((s) => s.id === m.saleId)
+                      return (
+                        <div className="suggest-item" key={`${m.chargeId}-${m.rowIndex}`}>
+                          <div>
+                            <strong>Match {m.confidence === 'txid' ? 'TXID' : 'E2E'}</strong> · {m.txid}
+                            <div className="hint">
+                              {sale?.buyerName || 'Venda'} ← {m.row.payerName} · {brl(m.settleAmount)}
+                            </div>
+                          </div>
+                          <span className="badge quitado">Alta confiança</span>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
                 {importPreview.errors.slice(0, 3).map((err) => (
                   <p className="auth-error" key={err}>
                     {err}
@@ -642,23 +696,28 @@ export default function LocalApp() {
                         <th>Pagador</th>
                         <th>Valor</th>
                         <th>TXID</th>
+                        <th>Match</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {importPreview.rows.slice(0, 8).map((r, idx) => (
-                        <tr key={`${r.paidAt}-${r.payerName}-${idx}`}>
-                          <td>{new Date(r.paidAt).toLocaleDateString('pt-BR')}</td>
-                          <td>{r.payerName}</td>
-                          <td>{brl(r.amount)}</td>
-                          <td>{r.txid || r.endToEndId || '—'}</td>
-                        </tr>
-                      ))}
+                      {importPreview.rows.slice(0, 12).map((r, idx) => {
+                        const match = txidPreview.find((m) => m.rowIndex === idx)
+                        return (
+                          <tr key={`${r.paidAt}-${r.payerName}-${idx}`}>
+                            <td>{new Date(r.paidAt).toLocaleDateString('pt-BR')}</td>
+                            <td>{r.payerName}</td>
+                            <td>{brl(r.amount)}</td>
+                            <td>{r.txid || r.endToEndId || '—'}</td>
+                            <td>{match ? <span className="badge quitado">TXID</span> : <span className="badge pendente">Manual</span>}</td>
+                          </tr>
+                        )
+                      })}
                     </tbody>
                   </table>
                 </div>
                 <div className="btn-row">
                   <button type="button" className="btn btn-primary" onClick={confirmImport} disabled={!importPreview.rows.length}>
-                    Importar {importPreview.rows.length} PIX
+                    Importar e baixar por TXID ({txidPreview.length})
                   </button>
                 </div>
               </div>
@@ -764,6 +823,117 @@ export default function LocalApp() {
             </div>
           </section>
         </>
+      )}
+
+      {tab === 'cobrancas' && (
+        <section className="grid-2">
+          <form
+            className="panel"
+            onSubmit={(e) => {
+              e.preventDefault()
+              const fd = new FormData(e.currentTarget)
+              const result = attachTxidToSale(String(fd.get('saleId')), String(fd.get('txid')), Number(fd.get('amount') || 0) || undefined)
+              if (!result.ok) return showToast(result.error)
+              e.currentTarget.reset()
+              showToast(`TXID vinculado: ${result.charge.txid}`)
+            }}
+          >
+            <div className="panel-head">
+              <div>
+                <h2>Vincular TXID à venda</h2>
+                <p>Cole o TXID gerado no banco/PSP. Depois, ao importar o CSV com o mesmo TXID, a baixa é automática.</p>
+              </div>
+            </div>
+            <div className="form-grid">
+              <label className="full">
+                Venda em aberto
+                <select name="saleId" required defaultValue="">
+                  <option value="" disabled>
+                    Selecione
+                  </option>
+                  {sales
+                    .filter((s) => s.paidAmount < s.totalAmount - 0.009)
+                    .map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.buyerName} · aberto {brl(s.totalAmount - s.paidAmount)}
+                      </option>
+                    ))}
+                </select>
+              </label>
+              <label className="full">
+                TXID do banco/PSP
+                <input name="txid" required placeholder="Cole o identificador da cobrança" />
+              </label>
+              <label>
+                Valor esperado (opcional)
+                <input name="amount" type="number" min="0.01" step="0.01" />
+              </label>
+            </div>
+            <div className="btn-row">
+              <button className="btn btn-primary" type="submit">
+                Vincular TXID
+              </button>
+            </div>
+          </form>
+
+          <div className="panel">
+            <div className="panel-head">
+              <div>
+                <h2>Cobranças / TXIDs</h2>
+                <p>{pixCharges.length} registro(s).</p>
+              </div>
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Venda</th>
+                    <th>TXID</th>
+                    <th>Valor</th>
+                    <th>Status</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pixCharges.length === 0 && (
+                    <tr>
+                      <td colSpan={5} className="empty">
+                        Nenhum TXID ainda. Gere na venda ou vincule manualmente.
+                      </td>
+                    </tr>
+                  )}
+                  {pixCharges.map((c) => {
+                    const sale = sales.find((s) => s.id === c.saleId)
+                    return (
+                      <tr key={c.id}>
+                        <td>{sale?.buyerName || '—'}</td>
+                        <td>
+                          <code>{c.txid}</code>
+                        </td>
+                        <td>{brl(c.amount)}</td>
+                        <td>
+                          <span className={`badge ${c.status === 'paid' ? 'quitado' : 'pendente'}`}>{c.status}</span>
+                        </td>
+                        <td>
+                          <button
+                            type="button"
+                            className="btn btn-ghost"
+                            onClick={async () => {
+                              await navigator.clipboard.writeText(c.txid)
+                              showToast('TXID copiado.')
+                            }}
+                          >
+                            Copiar
+                          </button>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
       )}
 
       {tab === 'amortizacao' && (

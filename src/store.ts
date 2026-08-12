@@ -4,10 +4,13 @@ import type {
   AmortizationEntry,
   AppState,
   PaymentStatus,
+  PixCharge,
   PixPayment,
   Raffle,
   Sale,
 } from './types'
+import { makeLocalTxid, previewTxidMatches } from './txidMatch'
+import type { ParsedPixRow } from './csvImport'
 
 function uid() {
   return crypto.randomUUID()
@@ -49,6 +52,14 @@ type Store = AppState & {
       notes?: string
     }>,
   ) => { imported: number; skipped: number }
+  importCsvAndSettleByTxid: (rows: ParsedPixRow[]) => {
+    imported: number
+    skipped: number
+    settled: number
+    unmatchedWithTxid: number
+  }
+  createChargeForSale: (saleId: string, amount?: number) => { ok: true; charge: PixCharge } | { ok: false; error: string }
+  attachTxidToSale: (saleId: string, txid: string, amount?: number) => { ok: true; charge: PixCharge } | { ok: false; error: string }
   removePix: (id: string) => void
   amortize: (saleId: string, pixPaymentId: string, amount: number, note?: string) => {
     ok: boolean
@@ -71,6 +82,7 @@ const empty: AppState = {
   sales: [],
   pixPayments: [],
   amortizations: [],
+  pixCharges: [],
 }
 
 export const useStore = create<Store>()(
@@ -186,6 +198,103 @@ export const useStore = create<Store>()(
         return { imported: created.length, skipped }
       },
 
+      importCsvAndSettleByTxid: (rows) => {
+        const bulk = get().addPixBulk(rows)
+        const state = get()
+        const matches = previewTxidMatches(
+          rows,
+          state.pixCharges.map((c) => ({
+            id: c.id,
+            saleId: c.saleId,
+            txid: c.txid,
+            amount: c.amount,
+            status: c.status,
+          })),
+        )
+
+        let settled = 0
+        for (const match of matches) {
+          const pix = get().pixPayments.find((p) => {
+            const t = (p.txid || '').trim().toLowerCase()
+            const e = (p.endToEndId || '').trim().toLowerCase()
+            const key = match.txid.trim().toLowerCase()
+            return (
+              p.allocatedAmount < p.amount - 0.009 &&
+              (t === key || e === key) &&
+              Math.abs(p.amount - match.row.amount) < 0.01 &&
+              p.paidAt === match.row.paidAt
+            )
+          })
+          if (!pix) continue
+          const result = get().amortize(
+            match.saleId,
+            pix.id,
+            match.settleAmount,
+            `Baixa automática por ${match.confidence === 'txid' ? 'TXID' : 'End-to-end'}`,
+          )
+          if (!result.ok) continue
+          settled += 1
+          set((s) => ({
+            pixCharges: s.pixCharges.map((c) =>
+              c.id === match.chargeId
+                ? { ...c, status: 'paid' as const, paidAt: new Date().toISOString() }
+                : c,
+            ),
+          }))
+        }
+
+        const rowsWithId = rows.filter((r) => r.txid || r.endToEndId).length
+        return {
+          imported: bulk.imported,
+          skipped: bulk.skipped,
+          settled,
+          unmatchedWithTxid: Math.max(0, rowsWithId - settled),
+        }
+      },
+
+      createChargeForSale: (saleId, amount) => {
+        const sale = get().sales.find((s) => s.id === saleId)
+        if (!sale) return { ok: false, error: 'Venda não encontrada.' }
+        const open = sale.totalAmount - sale.paidAmount
+        if (open <= 0.009) return { ok: false, error: 'Venda já quitada.' }
+        const value = amount ?? open
+        if (!(value > 0) || value > open + 0.009) return { ok: false, error: 'Valor inválido.' }
+        const charge: PixCharge = {
+          id: uid(),
+          saleId,
+          txid: makeLocalTxid(),
+          amount: value,
+          status: 'pending',
+          createdAt: new Date().toISOString(),
+          note: 'Use este TXID na cobrança PIX / conferência do extrato',
+        }
+        set((s) => ({ pixCharges: [charge, ...s.pixCharges] }))
+        return { ok: true, charge }
+      },
+
+      attachTxidToSale: (saleId, txid, amount) => {
+        const clean = txid.trim()
+        if (!clean) return { ok: false, error: 'Informe o TXID.' }
+        const sale = get().sales.find((s) => s.id === saleId)
+        if (!sale) return { ok: false, error: 'Venda não encontrada.' }
+        const open = sale.totalAmount - sale.paidAmount
+        if (open <= 0.009) return { ok: false, error: 'Venda já quitada.' }
+        const value = amount ?? open
+        const exists = get().pixCharges.some((c) => c.txid.toLowerCase() === clean.toLowerCase())
+        if (exists) return { ok: false, error: 'TXID já cadastrado.' }
+        const charge: PixCharge = {
+          id: uid(),
+          saleId,
+          txid: clean,
+          amount: value,
+          status: 'pending',
+          createdAt: new Date().toISOString(),
+          note: 'TXID informado manualmente (banco/PSP)',
+        }
+        set((s) => ({ pixCharges: [charge, ...s.pixCharges] }))
+        return { ok: true, charge }
+      },
+
       removePix: (id) =>
         set((s) => {
           const linked = s.amortizations.filter((a) => a.pixPaymentId === id)
@@ -259,7 +368,7 @@ export const useStore = create<Store>()(
       },
 
       autoMatchSuggestions: () => {
-        const { sales, pixPayments } = get()
+        const { sales, pixPayments, pixCharges } = get()
         const openSales = sales
           .filter((s) => s.paidAmount < s.totalAmount - 0.009)
           .map((s) => ({
@@ -281,6 +390,31 @@ export const useStore = create<Store>()(
         }> = []
         const usedPix = new Set<string>()
         const usedSales = new Set<string>()
+
+        const pendingCharges = pixCharges.filter((c) => c.status === 'pending')
+
+        // 1) Highest confidence: TXID / end-to-end exact match via charge
+        for (const charge of pendingCharges) {
+          if (usedSales.has(charge.saleId)) continue
+          const sale = openSales.find((s) => s.id === charge.saleId)
+          if (!sale) continue
+          const key = charge.txid.trim().toLowerCase()
+          const pix = openPix.find((p) => {
+            if (usedPix.has(p.id)) return false
+            const t = (p.txid || '').trim().toLowerCase()
+            const e = (p.endToEndId || '').trim().toLowerCase()
+            return t === key || e === key
+          })
+          if (!pix) continue
+          suggestions.push({
+            saleId: sale.id,
+            pixPaymentId: pix.id,
+            amount: Math.min(sale.open, pix.open, charge.amount),
+            reason: 'TXID / End-to-end idêntico',
+          })
+          usedPix.add(pix.id)
+          usedSales.add(sale.id)
+        }
 
         for (const sale of openSales) {
           if (usedSales.has(sale.id)) continue
@@ -321,8 +455,8 @@ export const useStore = create<Store>()(
       },
 
       exportSnapshot: () => {
-        const { raffles, sales, pixPayments, amortizations } = get()
-        return { raffles, sales, pixPayments, amortizations }
+        const { raffles, sales, pixPayments, amortizations, pixCharges } = get()
+        return { raffles, sales, pixPayments, amortizations, pixCharges }
       },
 
       importSnapshot: (data) => {
@@ -334,6 +468,7 @@ export const useStore = create<Store>()(
           sales: data.sales,
           pixPayments: data.pixPayments,
           amortizations: data.amortizations,
+          pixCharges: Array.isArray(data.pixCharges) ? data.pixCharges : [],
         })
         return { ok: true }
       },
@@ -343,7 +478,6 @@ export const useStore = create<Store>()(
         const saleA = uid()
         const saleB = uid()
         const saleC = uid()
-        const pix1 = uid()
         const pix2 = uid()
         const pix3 = uid()
         const now = new Date()
@@ -400,15 +534,6 @@ export const useStore = create<Store>()(
           ],
           pixPayments: [
             {
-              id: pix1,
-              amount: 30,
-              paidAt: d(2).slice(0, 10),
-              payerName: 'Maria Souza',
-              txid: 'PIX-MARIA-30',
-              allocatedAmount: 0,
-              createdAt: d(2),
-            },
-            {
               id: pix2,
               amount: 10,
               paidAt: d(1).slice(0, 10),
@@ -446,12 +571,33 @@ export const useStore = create<Store>()(
               createdAt: d(1),
             },
           ],
+          pixCharges: [
+            {
+              id: uid(),
+              saleId: saleA,
+              txid: 'PIX-MARIA-30',
+              amount: 30,
+              status: 'pending',
+              createdAt: d(3),
+              note: 'Importe o CSV de exemplo na aba PIX para baixar automaticamente',
+            },
+          ],
         })
       },
 
       resetAll: () => set({ ...empty }),
     }),
-    { name: 'rifa-pix-v1' },
+    {
+      name: 'rifa-pix-v1',
+      merge: (persisted, current) => {
+        const p = (persisted || {}) as Partial<AppState>
+        return {
+          ...current,
+          ...p,
+          pixCharges: Array.isArray(p.pixCharges) ? p.pixCharges : [],
+        }
+      },
+    },
   ),
 )
 

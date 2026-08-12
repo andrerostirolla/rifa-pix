@@ -44,9 +44,21 @@ export interface AmortizationEntry {
   note?: string
 }
 
+export interface PixCharge {
+  id: string
+  saleId: string
+  txid: string
+  amount: number
+  status: 'pending' | 'paid' | 'expired' | 'cancelled'
+  createdAt: string
+  paidAt?: string
+  note?: string
+}
+
 export interface AppState {
   raffles: Raffle[]
   sales: Sale[]
   pixPayments: PixPayment[]
   amortizations: AmortizationEntry[]
+  pixCharges: PixCharge[]
 }

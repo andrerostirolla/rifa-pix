@@ -5,6 +5,7 @@ import * as api from './lib/api'
 import type { DbAmortization, DbPixCharge, DbPixPayment, DbRaffle, DbSale } from './lib/supabase'
 import { useAuth } from './lib/useAuth'
 import { brl, formatNumbers } from './store'
+import { previewTxidMatches } from './txidMatch'
 import type { PaymentStatus } from './types'
 
 type Tab = 'painel' | 'rifas' | 'vendas' | 'pix' | 'amortizacao' | 'cobrancas'
@@ -50,6 +51,7 @@ export default function CloudApp() {
   const [pixCharges, setPixCharges] = useState<DbPixCharge[]>([])
   const [csvText, setCsvText] = useState('')
   const [importPreview, setImportPreview] = useState<ReturnType<typeof parsePixCsv> | null>(null)
+  const [manualTxid, setManualTxid] = useState('')
 
   const showToast = (msg: string) => {
     setToast(msg)
@@ -190,15 +192,29 @@ export default function CloudApp() {
   const confirmImport = async () => {
     if (!importPreview?.rows.length) return showToast('Nada para importar.')
     try {
-      await api.createPixBulk(userId, importPreview.rows)
+      const result = await api.importCsvAndSettleByTxid(userId, importPreview.rows)
       setCsvText('')
       setImportPreview(null)
       await refresh()
-      showToast(`Importados ${importPreview.rows.length} PIX.`)
+      showToast(`Importados ${result.imported}. Baixas por TXID: ${result.settled}. Sem match: ${result.unmatchedWithTxid}.`)
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Erro na importação')
     }
   }
+
+  const txidPreview = useMemo(() => {
+    if (!importPreview?.rows.length) return []
+    return previewTxidMatches(
+      importPreview.rows,
+      pixCharges.map((c) => ({
+        id: c.id,
+        saleId: c.sale_id,
+        txid: c.txid,
+        amount: Number(c.amount),
+        status: c.status,
+      })),
+    )
+  }, [importPreview, pixCharges])
 
   const generateCharge = async (saleId: string) => {
     try {
@@ -490,8 +506,8 @@ export default function CloudApp() {
           <section className="panel" style={{ marginBottom: '1rem' }}>
             <div className="panel-head">
               <div>
-                <h2>Importar CSV</h2>
-                <p>Continua útil para conciliar créditos sem cobrança gerada.</p>
+                <h2>Importar CSV com baixa por TXID</h2>
+                <p>Linhas com o mesmo TXID de uma cobrança pendente são amortizadas automaticamente.</p>
               </div>
               <button type="button" className="btn btn-secondary" onClick={() => previewCsv(SAMPLE_CSV)}>
                 Exemplo
@@ -502,11 +518,31 @@ export default function CloudApp() {
               <textarea value={csvText} onChange={(e) => previewCsv(e.target.value)} />
             </label>
             {importPreview && (
-              <div className="btn-row">
-                <button type="button" className="btn btn-primary" onClick={confirmImport}>
-                  Importar {importPreview.rows.length}
-                </button>
-              </div>
+              <>
+                <p className="hint" style={{ marginTop: '0.75rem' }}>
+                  {importPreview.rows.length} crédito(s) · {txidPreview.length} match(es) por TXID
+                </p>
+                {txidPreview.length > 0 && (
+                  <div className="suggest" style={{ margin: '0.75rem 0' }}>
+                    {txidPreview.map((m) => (
+                      <div className="suggest-item" key={`${m.chargeId}-${m.rowIndex}`}>
+                        <div>
+                          <strong>{m.txid}</strong>
+                          <div className="hint">
+                            {saleName(m.saleId)} ← {m.row.payerName} · {brl(m.settleAmount)}
+                          </div>
+                        </div>
+                        <span className="badge quitado">Alta confiança</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div className="btn-row">
+                  <button type="button" className="btn btn-primary" onClick={confirmImport}>
+                    Importar e baixar por TXID ({txidPreview.length})
+                  </button>
+                </div>
+              </>
             )}
           </section>
           <section className="grid-2">
@@ -577,67 +613,128 @@ export default function CloudApp() {
       )}
 
       {tab === 'cobrancas' && (
-        <section className="panel">
-          <div className="panel-head">
-            <div>
-              <h2>Cobranças PIX</h2>
-              <p>Cada cobrança tem `txid` único. O webhook usa isso para baixar a venda automaticamente.</p>
+        <section className="grid-2">
+          <form
+            className="panel"
+            onSubmit={async (e) => {
+              e.preventDefault()
+              const fd = new FormData(e.currentTarget)
+              try {
+                const charge = await api.attachTxidToSale(
+                  userId,
+                  String(fd.get('saleId')),
+                  String(fd.get('txid')),
+                  Number(fd.get('amount') || 0) || undefined,
+                )
+                e.currentTarget.reset()
+                setManualTxid('')
+                await refresh()
+                showToast(`TXID vinculado: ${charge.txid}`)
+              } catch (err) {
+                showToast(err instanceof Error ? err.message : 'Erro ao vincular TXID')
+              }
+            }}
+          >
+            <div className="panel-head">
+              <div>
+                <h2>Vincular TXID manual</h2>
+                <p>Se você já gerou a cobrança no banco, cole o TXID aqui para o CSV baixar certo.</p>
+              </div>
             </div>
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Venda</th>
-                  <th>TXID</th>
-                  <th>Valor</th>
-                  <th>Status</th>
-                  <th>Copia e cola</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {pixCharges.length === 0 && (
+            <div className="form-grid">
+              <label className="full">
+                Venda
+                <select name="saleId" required defaultValue="">
+                  <option value="" disabled>
+                    Selecione
+                  </option>
+                  {sales
+                    .filter((s) => Number(s.paid_amount) < Number(s.total_amount) - 0.009)
+                    .map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.buyer_name} · {brl(Number(s.total_amount) - Number(s.paid_amount))}
+                      </option>
+                    ))}
+                </select>
+              </label>
+              <label className="full">
+                TXID
+                <input name="txid" required value={manualTxid} onChange={(e) => setManualTxid(e.target.value)} />
+              </label>
+              <label>
+                Valor (opcional)
+                <input name="amount" type="number" step="0.01" min="0.01" />
+              </label>
+            </div>
+            <div className="btn-row">
+              <button className="btn btn-primary" type="submit">
+                Vincular
+              </button>
+            </div>
+          </form>
+
+          <div className="panel">
+            <div className="panel-head">
+              <div>
+                <h2>Cobranças PIX</h2>
+                <p>Webhook ou CSV com o mesmo TXID fazem a baixa automática.</p>
+              </div>
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead>
                   <tr>
-                    <td colSpan={6} className="empty">
-                      Nenhuma cobrança. Gere a partir do painel ou vendas.
-                    </td>
+                    <th>Venda</th>
+                    <th>TXID</th>
+                    <th>Valor</th>
+                    <th>Status</th>
+                    <th>Copia e cola</th>
+                    <th></th>
                   </tr>
-                )}
-                {pixCharges.map((c) => (
-                  <tr key={c.id}>
-                    <td>{saleName(c.sale_id)}</td>
-                    <td>
-                      <code>{c.txid}</code>
-                    </td>
-                    <td>{brl(Number(c.amount))}</td>
-                    <td>
-                      <span className={`badge ${c.status === 'paid' ? 'quitado' : 'pendente'}`}>{c.status}</span>
-                    </td>
-                    <td>
-                      <button
-                        type="button"
-                        className="btn btn-ghost"
-                        onClick={async () => {
-                          if (!c.copy_paste) return
-                          await navigator.clipboard.writeText(c.copy_paste)
-                          showToast('PIX copia-e-cola copiado.')
-                        }}
-                      >
-                        Copiar
-                      </button>
-                    </td>
-                    <td>
-                      {c.status === 'pending' && (
-                        <button type="button" className="btn btn-primary" onClick={() => simulatePay(c.id)}>
-                          Simular pagamento
+                </thead>
+                <tbody>
+                  {pixCharges.length === 0 && (
+                    <tr>
+                      <td colSpan={6} className="empty">
+                        Nenhuma cobrança. Gere a partir do painel ou vendas.
+                      </td>
+                    </tr>
+                  )}
+                  {pixCharges.map((c) => (
+                    <tr key={c.id}>
+                      <td>{saleName(c.sale_id)}</td>
+                      <td>
+                        <code>{c.txid}</code>
+                      </td>
+                      <td>{brl(Number(c.amount))}</td>
+                      <td>
+                        <span className={`badge ${c.status === 'paid' ? 'quitado' : 'pendente'}`}>{c.status}</span>
+                      </td>
+                      <td>
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          onClick={async () => {
+                            if (!c.copy_paste) return
+                            await navigator.clipboard.writeText(c.copy_paste)
+                            showToast('PIX copia-e-cola copiado.')
+                          }}
+                        >
+                          Copiar
                         </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+                      </td>
+                      <td>
+                        {c.status === 'pending' && (
+                          <button type="button" className="btn btn-primary" onClick={() => simulatePay(c.id)}>
+                            Simular pagamento
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
         </section>
       )}

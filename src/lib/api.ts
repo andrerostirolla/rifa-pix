@@ -116,6 +116,85 @@ export async function createPixBulk(
   return (data || []) as DbPixPayment[]
 }
 
+export async function importCsvAndSettleByTxid(
+  userId: string,
+  inputs: Array<{ amount: number; paidAt: string; payerName: string; txid?: string; endToEndId?: string; notes?: string }>,
+) {
+  const imported = await createPixBulk(userId, inputs)
+  const { data: charges, error } = await client()
+    .from('pix_charges')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('status', 'pending')
+  if (error) throw error
+
+  const pending = (charges || []) as DbPixCharge[]
+  const byTxid = new Map(pending.map((c) => [c.txid.trim().toLowerCase(), c]))
+  let settled = 0
+
+  for (const payment of imported) {
+    const keys = [payment.txid, payment.end_to_end_id]
+      .map((v) => (v || '').trim().toLowerCase())
+      .filter(Boolean)
+    const charge = keys.map((k) => byTxid.get(k)).find(Boolean)
+    if (!charge) continue
+
+    const amount = Math.min(Number(payment.amount), Number(charge.amount))
+    try {
+      await amortize(userId, charge.sale_id, payment.id, amount, 'Baixa automática por TXID (CSV)')
+      await client()
+        .from('pix_charges')
+        .update({ status: 'paid', paid_at: new Date().toISOString() })
+        .eq('id', charge.id)
+      byTxid.delete(charge.txid.trim().toLowerCase())
+      settled += 1
+    } catch {
+      // keep going; remaining stay for manual conference
+    }
+  }
+
+  const withId = inputs.filter((r) => r.txid || r.endToEndId).length
+  return {
+    imported: imported.length,
+    settled,
+    unmatchedWithTxid: Math.max(0, withId - settled),
+  }
+}
+
+export async function attachTxidToSale(userId: string, saleId: string, txid: string, amount?: number) {
+  const clean = txid.trim()
+  if (!clean) throw new Error('Informe o TXID')
+
+  const { data: sale, error: saleError } = await client()
+    .from('sales')
+    .select('*')
+    .eq('id', saleId)
+    .eq('user_id', userId)
+    .single()
+  if (saleError || !sale) throw saleError || new Error('Venda não encontrada')
+
+  const open = Number(sale.total_amount) - Number(sale.paid_amount)
+  const value = amount ?? open
+  if (!(value > 0) || value > open + 0.009) throw new Error('Valor inválido')
+
+  const { data, error } = await client()
+    .from('pix_charges')
+    .insert({
+      user_id: userId,
+      sale_id: saleId,
+      txid: clean,
+      amount: value,
+      status: 'pending',
+      provider: 'manual-txid',
+      copy_paste: clean,
+      qr_code: null,
+    })
+    .select('*')
+    .single()
+  if (error) throw error
+  return data as DbPixCharge
+}
+
 export async function deletePix(id: string) {
   const { error } = await client().from('pix_payments').delete().eq('id', id)
   if (error) throw error

@@ -5,6 +5,7 @@ import { makeLocalTxid, previewTxidMatches } from './txidMatch'
 import type {
   AmortizationEntry,
   AppState,
+  Block,
   Member,
   MemberSettlement,
   NumberRange,
@@ -32,18 +33,38 @@ function overlaps(aFrom: number, aTo: number, bFrom: number, bTo: number) {
 }
 
 type Store = AppState & {
-  addRaffle: (input: Omit<Raffle, 'id' | 'createdAt' | 'active'> & { active?: boolean }) => void
+  addRaffle: (input: {
+    name: string
+    eventName: string
+    ticketPrice: number
+    prize: string
+    blockCount: number
+    numbersPerBlock: number
+    active?: boolean
+  }) => { ok: true; raffle: Raffle } | { ok: false; error: string }
   removeRaffle: (id: string) => void
   addMember: (input: { name: string; phone?: string; pin: string }) => { ok: true; member: Member } | { ok: false; error: string }
   updateMember: (id: string, patch: Partial<Pick<Member, 'name' | 'phone' | 'pin' | 'active'>>) => void
   removeMember: (id: string) => void
+  assignBlock: (blockId: string, memberId: string) => { ok: boolean; error?: string }
+  transferBlock: (blockId: string, toMemberId: string) => { ok: boolean; error?: string }
+  unassignBlock: (blockId: string) => void
   assignRange: (input: { memberId: string; raffleId: string; fromNumber: number; toNumber: number }) => {
     ok: boolean
     error?: string
   }
   removeRange: (id: string) => void
-  memberNumbers: (memberId: string, raffleId: string) => number[]
+  memberNumbers: (memberId: string, raffleId: string, blockId?: string) => number[]
+  blockNumbers: (blockId: string) => number[]
   soldNumbers: (raffleId: string) => Set<number>
+  blockStats: (blockId: string) => { total: number; sold: number; open: number }
+  memberBlockStats: (memberId: string, raffleId?: string) => {
+    blocks: number
+    openBlocks: number
+    soldOutBlocks: number
+    openNumbers: number
+    soldNumbers: number
+  }
   addSale: (input: {
     raffleId: string
     memberId: string
@@ -56,6 +77,7 @@ type Store = AppState & {
     proofTxid?: string
     proofImageDataUrl?: string
     receivedNow?: boolean
+    blockId?: string
   }) => { ok: true; sale: Sale } | { ok: false; error: string }
   removeSale: (id: string) => void
   addPix: (input: {
@@ -109,6 +131,7 @@ type Store = AppState & {
 const empty: AppState = {
   raffles: [],
   members: [],
+  blocks: [],
   numberRanges: [],
   sales: [],
   pixPayments: [],
@@ -122,25 +145,54 @@ export const useStore = create<Store>()(
     (set, get) => ({
       ...empty,
 
-      addRaffle: (input) =>
+      addRaffle: (input) => {
+        const blockCount = Math.floor(input.blockCount)
+        const numbersPerBlock = Math.floor(input.numbersPerBlock)
+        if (!(blockCount > 0) || !(numbersPerBlock > 0)) {
+          return { ok: false, error: 'Informe quantidade de blocos e cartelas por bloco.' }
+        }
+        if (!(input.ticketPrice > 0)) return { ok: false, error: 'Preço inválido.' }
+        const totalNumbers = blockCount * numbersPerBlock
+        const raffleId = uid()
+        const raffle: Raffle = {
+          id: raffleId,
+          name: input.name.trim(),
+          eventName: input.eventName.trim() || input.name.trim(),
+          ticketPrice: input.ticketPrice,
+          totalNumbers,
+          prize: input.prize.trim(),
+          active: input.active ?? true,
+          blockCount,
+          numbersPerBlock,
+          createdAt: new Date().toISOString(),
+        }
+        const blocks: Block[] = []
+        for (let i = 0; i < blockCount; i += 1) {
+          const fromNumber = i * numbersPerBlock + 1
+          const toNumber = (i + 1) * numbersPerBlock
+          blocks.push({
+            id: uid(),
+            raffleId,
+            index: i + 1,
+            label: `Bloco ${i + 1}`,
+            fromNumber,
+            toNumber,
+            createdAt: new Date().toISOString(),
+          })
+        }
         set((s) => ({
-          raffles: [
-            {
-              ...input,
-              eventName: input.eventName.trim() || input.name.trim(),
-              active: input.active ?? true,
-              id: uid(),
-              createdAt: new Date().toISOString(),
-            },
-            ...s.raffles,
-          ],
-        })),
+          raffles: [raffle, ...s.raffles],
+          blocks: [...blocks, ...s.blocks],
+        }))
+        return { ok: true, raffle }
+      },
 
       removeRaffle: (id) =>
         set((s) => ({
           raffles: s.raffles.filter((r) => r.id !== id),
           sales: s.sales.filter((sale) => sale.raffleId !== id),
           numberRanges: s.numberRanges.filter((r) => r.raffleId !== id),
+          blocks: s.blocks.filter((b) => b.raffleId !== id),
           pixCharges: s.pixCharges.filter((c) => !s.sales.some((sale) => sale.id === c.saleId && sale.raffleId === id)),
         })),
 
@@ -173,7 +225,25 @@ export const useStore = create<Store>()(
         set((s) => ({
           members: s.members.filter((m) => m.id !== id),
           numberRanges: s.numberRanges.filter((r) => r.memberId !== id),
+          blocks: s.blocks.map((b) => (b.memberId === id ? { ...b, memberId: undefined } : b)),
           memberSettlements: s.memberSettlements.filter((x) => x.memberId !== id),
+        })),
+
+      assignBlock: (blockId, memberId) => {
+        const block = get().blocks.find((b) => b.id === blockId)
+        if (!block) return { ok: false, error: 'Bloco não encontrado.' }
+        if (!get().members.some((m) => m.id === memberId && m.active)) return { ok: false, error: 'Membro inválido.' }
+        set((s) => ({
+          blocks: s.blocks.map((b) => (b.id === blockId ? { ...b, memberId } : b)),
+        }))
+        return { ok: true }
+      },
+
+      transferBlock: (blockId, toMemberId) => get().assignBlock(blockId, toMemberId),
+
+      unassignBlock: (blockId) =>
+        set((s) => ({
+          blocks: s.blocks.map((b) => (b.id === blockId ? { ...b, memberId: undefined } : b)),
         })),
 
       assignRange: (input) => {
@@ -206,13 +276,28 @@ export const useStore = create<Store>()(
 
       removeRange: (id) => set((s) => ({ numberRanges: s.numberRanges.filter((r) => r.id !== id) })),
 
-      memberNumbers: (memberId, raffleId) => {
-        const ranges = get().numberRanges.filter((r) => r.memberId === memberId && r.raffleId === raffleId)
+      blockNumbers: (blockId) => {
+        const block = get().blocks.find((b) => b.id === blockId)
+        if (!block) return []
         const nums: number[] = []
-        for (const r of ranges) {
-          for (let n = r.fromNumber; n <= r.toNumber; n += 1) nums.push(n)
+        for (let n = block.fromNumber; n <= block.toNumber; n += 1) nums.push(n)
+        return nums
+      },
+
+      memberNumbers: (memberId, raffleId, blockId) => {
+        if (blockId) {
+          const block = get().blocks.find((b) => b.id === blockId && b.memberId === memberId && b.raffleId === raffleId)
+          return block ? get().blockNumbers(block.id) : []
         }
-        return [...new Set(nums)].sort((a, b) => a - b)
+        const fromBlocks = get()
+          .blocks.filter((b) => b.memberId === memberId && b.raffleId === raffleId)
+          .flatMap((b) => get().blockNumbers(b.id))
+        const ranges = get().numberRanges.filter((r) => r.memberId === memberId && r.raffleId === raffleId)
+        const fromRanges: number[] = []
+        for (const r of ranges) {
+          for (let n = r.fromNumber; n <= r.toNumber; n += 1) fromRanges.push(n)
+        }
+        return [...new Set([...fromBlocks, ...fromRanges])].sort((a, b) => a - b)
       },
 
       soldNumbers: (raffleId) => {
@@ -221,6 +306,37 @@ export const useStore = create<Store>()(
           sale.numbers.forEach((n) => set.add(n))
         }
         return set
+      },
+
+      blockStats: (blockId) => {
+        const block = get().blocks.find((b) => b.id === blockId)
+        if (!block) return { total: 0, sold: 0, open: 0 }
+        const nums = get().blockNumbers(blockId)
+        const sold = get().soldNumbers(block.raffleId)
+        const soldCount = nums.filter((n) => sold.has(n)).length
+        return { total: nums.length, sold: soldCount, open: nums.length - soldCount }
+      },
+
+      memberBlockStats: (memberId, raffleId) => {
+        const list = get().blocks.filter((b) => b.memberId === memberId && (!raffleId || b.raffleId === raffleId))
+        let openBlocks = 0
+        let soldOutBlocks = 0
+        let openNumbers = 0
+        let soldCount = 0
+        for (const b of list) {
+          const st = get().blockStats(b.id)
+          openNumbers += st.open
+          soldCount += st.sold
+          if (st.open === 0) soldOutBlocks += 1
+          else openBlocks += 1
+        }
+        return {
+          blocks: list.length,
+          openBlocks,
+          soldOutBlocks,
+          openNumbers,
+          soldNumbers: soldCount,
+        }
       },
 
       addSale: (input) => {
@@ -235,9 +351,9 @@ export const useStore = create<Store>()(
           return { ok: false, error: 'Informe se o PIX foi para a entidade ou para o vendedor.' }
         }
 
-        const allowed = new Set(get().memberNumbers(input.memberId, input.raffleId))
+        const allowed = new Set(get().memberNumbers(input.memberId, input.raffleId, input.blockId))
         for (const n of input.numbers) {
-          if (!allowed.has(n)) return { ok: false, error: `Número ${n} não pertence a este membro.` }
+          if (!allowed.has(n)) return { ok: false, error: `Número ${n} não pertence a este membro/bloco.` }
         }
         const sold = get().soldNumbers(input.raffleId)
         for (const n of input.numbers) {
@@ -261,6 +377,7 @@ export const useStore = create<Store>()(
           pixDestination: input.paymentMethod === 'pix' ? input.pixDestination : undefined,
           notes: input.notes?.trim() || undefined,
           createdAt: new Date().toISOString(),
+          blockId: input.blockId,
         }
 
         const proofTxid = input.proofTxid?.trim()
@@ -547,6 +664,7 @@ export const useStore = create<Store>()(
         return {
           raffles: s.raffles,
           members: s.members,
+          blocks: s.blocks,
           numberRanges: s.numberRanges,
           sales: s.sales,
           pixPayments: s.pixPayments,
@@ -563,6 +681,7 @@ export const useStore = create<Store>()(
         set({
           raffles: data.raffles,
           members: data.members || [],
+          blocks: data.blocks || [],
           numberRanges: data.numberRanges || [],
           sales: data.sales,
           pixPayments: data.pixPayments || [],
@@ -577,8 +696,22 @@ export const useStore = create<Store>()(
         const raffleId = uid()
         const m1 = uid()
         const m2 = uid()
-        const saleA = uid()
         const now = new Date().toISOString()
+        const blocks: Block[] = []
+        for (let i = 0; i < 4; i += 1) {
+          const fromNumber = i * 50 + 1
+          const toNumber = (i + 1) * 50
+          blocks.push({
+            id: uid(),
+            raffleId,
+            index: i + 1,
+            label: `Bloco ${i + 1}`,
+            fromNumber,
+            toNumber,
+            memberId: i < 2 ? m1 : m2,
+            createdAt: now,
+          })
+        }
         set({
           raffles: [
             {
@@ -586,9 +719,11 @@ export const useStore = create<Store>()(
               name: 'Rifa Churrasco',
               eventName: 'Festa da Turma 2026',
               ticketPrice: 10,
-              totalNumbers: 100,
+              totalNumbers: 200,
               prize: 'Kit churrasco',
               active: true,
+              blockCount: 4,
+              numbersPerBlock: 50,
               createdAt: now,
             },
           ],
@@ -596,15 +731,14 @@ export const useStore = create<Store>()(
             { id: m1, name: 'Carlos', pin: '1234', phone: '11999990001', active: true, createdAt: now },
             { id: m2, name: 'Fernanda', pin: '5678', phone: '11999990002', active: true, createdAt: now },
           ],
-          numberRanges: [
-            { id: uid(), memberId: m1, raffleId, fromNumber: 1, toNumber: 50, createdAt: now },
-            { id: uid(), memberId: m2, raffleId, fromNumber: 51, toNumber: 100, createdAt: now },
-          ],
+          blocks,
+          numberRanges: [],
           sales: [
             {
-              id: saleA,
+              id: uid(),
               raffleId,
               memberId: m1,
+              blockId: blocks[0].id,
               buyerName: 'Maria Souza',
               numbers: [7, 8, 9],
               totalAmount: 30,
@@ -624,7 +758,7 @@ export const useStore = create<Store>()(
       resetAll: () => set({ ...empty }),
     }),
     {
-      name: 'rifa-pix-v2',
+      name: 'rifa-pix-v3-blocks',
       merge: (persisted, current) => {
         const p = (persisted || {}) as Partial<AppState>
         return {
@@ -636,6 +770,7 @@ export const useStore = create<Store>()(
             active: r.active ?? true,
           })),
           members: p.members || [],
+          blocks: p.blocks || [],
           numberRanges: p.numberRanges || [],
           sales: (p.sales || []).map((s) => ({
             ...s,

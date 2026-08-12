@@ -8,7 +8,7 @@ import { previewTxidMatches } from './txidMatch'
 import type { PaymentMethod, PaymentStatus, PixDestination } from './types'
 
 type AdminTab = 'painel' | 'equipe' | 'eventos' | 'vendas' | 'pix' | 'txid' | 'amortizacao' | 'relatorios'
-type MemberTab = 'numeros' | 'vendas'
+type MemberTab = 'blocos' | 'vendas'
 
 const statusLabel: Record<PaymentStatus, string> = {
   pendente: 'Pendente',
@@ -23,18 +23,19 @@ export default function LocalApp() {
   const memberId = session?.memberId || ''
 
   const [adminTab, setAdminTab] = useState<AdminTab>('painel')
-  const [memberTab, setMemberTab] = useState<MemberTab>('numeros')
+  const [memberTab, setMemberTab] = useState<MemberTab>('blocos')
   const [toast, setToast] = useState<string | null>(null)
   const [selectedNumbers, setSelectedNumbers] = useState<number[]>([])
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('dinheiro')
   const [pixDestination, setPixDestination] = useState<PixDestination>('entidade')
   const [saleRaffleId, setSaleRaffleId] = useState('')
+  const [openBlockId, setOpenBlockId] = useState<string | null>(null)
   const [csvText, setCsvText] = useState('')
   const [importPreview, setImportPreview] = useState<ReturnType<typeof parsePixCsv> | null>(null)
 
   const raffles = useStore((s) => s.raffles)
   const members = useStore((s) => s.members)
-  const numberRanges = useStore((s) => s.numberRanges)
+  const blocks = useStore((s) => s.blocks)
   const sales = useStore((s) => s.sales)
   const pixPayments = useStore((s) => s.pixPayments)
   const amortizations = useStore((s) => s.amortizations)
@@ -44,10 +45,12 @@ export default function LocalApp() {
   const removeRaffle = useStore((s) => s.removeRaffle)
   const addMember = useStore((s) => s.addMember)
   const removeMember = useStore((s) => s.removeMember)
-  const assignRange = useStore((s) => s.assignRange)
-  const removeRange = useStore((s) => s.removeRange)
+  const assignBlock = useStore((s) => s.assignBlock)
+  const unassignBlock = useStore((s) => s.unassignBlock)
   const memberNumbers = useStore((s) => s.memberNumbers)
   const soldNumbers = useStore((s) => s.soldNumbers)
+  const blockStats = useStore((s) => s.blockStats)
+  const memberBlockStats = useStore((s) => s.memberBlockStats)
   const addSale = useStore((s) => s.addSale)
   const removeSale = useStore((s) => s.removeSale)
   const importCsvAndSettleByTxid = useStore((s) => s.importCsvAndSettleByTxid)
@@ -64,8 +67,18 @@ export default function LocalApp() {
 
   const activeRaffles = raffles.filter((r) => r.active)
   const currentRaffleId = saleRaffleId || activeRaffles[0]?.id || ''
-  const myNumbers = memberId && currentRaffleId ? memberNumbers(memberId, currentRaffleId) : []
+  const myBlocks = useMemo(
+    () =>
+      blocks
+        .filter((b) => b.raffleId === currentRaffleId && b.memberId === memberId)
+        .sort((a, b) => a.index - b.index),
+    [blocks, currentRaffleId, memberId],
+  )
+  const openBlock = myBlocks.find((b) => b.id === openBlockId) || null
+  const myNumbers =
+    memberId && currentRaffleId ? memberNumbers(memberId, currentRaffleId, openBlock?.id) : []
   const sold = currentRaffleId ? soldNumbers(currentRaffleId) : new Set<number>()
+  const myOpenTotal = myBlocks.reduce((acc, b) => acc + blockStats(b.id).open, 0)
 
   const visibleSales = useMemo(() => {
     if (isAdmin) return sales
@@ -136,6 +149,7 @@ export default function LocalApp() {
       notes: String(fd.get('notes') || ''),
       proofTxid: String(fd.get('proofTxid') || ''),
       receivedNow: paymentMethod === 'dinheiro' || String(fd.get('receivedNow') || '') === 'sim',
+      blockId: openBlockId || undefined,
     })
     if (!result.ok) return showToast(result.error)
     e.currentTarget.reset()
@@ -187,7 +201,7 @@ export default function LocalApp() {
                 ))
               : (
                   [
-                    ['numeros', 'Meus números'],
+                    ['blocos', 'Meus blocos'],
                     ['vendas', 'Minhas vendas'],
                   ] as const
                 ).map(([id, label]) => (
@@ -210,13 +224,13 @@ export default function LocalApp() {
       </header>
 
       {/* MEMBER VIEW */}
-      {!isAdmin && memberTab === 'numeros' && (
+      {!isAdmin && memberTab === 'blocos' && !openBlock && (
         <section className="panel">
           <div className="panel-head">
             <div>
-              <h2>Meus números</h2>
+              <h2>Meus blocos</h2>
               <p>
-                Verde = disponível · Vermelho = vendido. Selecione os verdes para vender.
+                Toque em um bloco para vender os números. Em aberto no total: <strong>{myOpenTotal}</strong>
               </p>
             </div>
             <label>
@@ -226,6 +240,7 @@ export default function LocalApp() {
                 onChange={(e) => {
                   setSaleRaffleId(e.target.value)
                   setSelectedNumbers([])
+                  setOpenBlockId(null)
                 }}
               >
                 {activeRaffles.map((r) => (
@@ -236,98 +251,120 @@ export default function LocalApp() {
               </select>
             </label>
           </div>
-          <NumberGrid
-            numbers={myNumbers}
-            sold={sold}
-            selected={new Set(selectedNumbers)}
-            onToggle={toggleNumber}
-          />
-          <p className="hint" style={{ marginTop: '0.75rem' }}>
-            Selecionados: {selectedNumbers.length ? formatNumbers(selectedNumbers) : 'nenhum'}
-          </p>
+          <div className="block-grid">
+            {myBlocks.length === 0 && <p className="empty">Nenhum bloco atribuído a você neste evento.</p>}
+            {myBlocks.map((b) => {
+              const st = blockStats(b.id)
+              const soldOut = st.open === 0
+              return (
+                <button
+                  key={b.id}
+                  type="button"
+                  className={`block-card ${soldOut ? 'sold-out' : 'has-open'}`}
+                  onClick={() => {
+                    setOpenBlockId(b.id)
+                    setSelectedNumbers([])
+                    setMemberTab('vendas')
+                  }}
+                >
+                  <strong>{b.label}</strong>
+                  <span className="hint">
+                    nº {String(b.fromNumber).padStart(2, '0')}–{String(b.toNumber).padStart(2, '0')}
+                  </span>
+                  <span className="block-open">{st.open} abertos</span>
+                  <span className="hint">
+                    {st.sold}/{st.total} vendidos
+                  </span>
+                </button>
+              )
+            })}
+          </div>
         </section>
       )}
 
-      {!isAdmin && memberTab === 'vendas' && (
+      {!isAdmin && (memberTab === 'vendas' || openBlock) && (
         <section className="grid-2">
           <form className="panel" onSubmit={onCreateSale}>
             <div className="panel-head">
               <div>
-                <h2>Lançar venda</h2>
-                <p>Só números seus. TXID e observação são opcionais.</p>
+                <h2>{openBlock ? `Vender · ${openBlock.label}` : 'Lançar venda'}</h2>
+                <p>
+                  {openBlock
+                    ? `${String(openBlock.fromNumber).padStart(2, '0')}–${String(openBlock.toNumber).padStart(2, '0')} · ${blockStats(openBlock.id).open} abertos`
+                    : 'Abra um bloco em “Meus blocos” para vender com segurança.'}
+                </p>
               </div>
-            </div>
-            <div className="form-grid">
-              <label className="full">
-                Evento/rifa
-                <select
-                  name="raffleId"
-                  required
-                  value={currentRaffleId}
-                  onChange={(e) => {
-                    setSaleRaffleId(e.target.value)
+              {openBlock && (
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => {
+                    setOpenBlockId(null)
                     setSelectedNumbers([])
+                    setMemberTab('blocos')
                   }}
                 >
-                  {activeRaffles.map((r) => (
-                    <option key={r.id} value={r.id}>
-                      {r.eventName} — {r.name} ({brl(r.ticketPrice)})
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Comprador
-                <input name="buyerName" required />
-              </label>
-              <label>
-                WhatsApp
-                <input name="buyerPhone" />
-              </label>
-              <label className="full">
-                Forma de recebimento
-                <select
-                  value={paymentMethod}
-                  onChange={(e) => setPaymentMethod(e.target.value as PaymentMethod)}
-                  required
-                >
-                  <option value="dinheiro">Dinheiro</option>
-                  <option value="pix">PIX</option>
-                </select>
-              </label>
-              {paymentMethod === 'pix' && (
-                <label className="full">
-                  PIX caiu em qual conta?
-                  <select value={pixDestination} onChange={(e) => setPixDestination(e.target.value as PixDestination)} required>
-                    <option value="entidade">Conta da entidade</option>
-                    <option value="vendedor">Minha conta (vendedor)</option>
-                  </select>
-                </label>
+                  Voltar aos blocos
+                </button>
               )}
-              {paymentMethod === 'pix' && (
-                <label className="full">
-                  Já recebeu este PIX?
-                  <select name="receivedNow" defaultValue="nao">
-                    <option value="nao">Ainda não (fica pendente)</option>
-                    <option value="sim">Sim, já caiu</option>
-                  </select>
-                </label>
-              )}
-              <label className="full">
-                TXID / End-to-end (opcional)
-                <input name="proofTxid" placeholder="Do comprovante, se tiver" />
-              </label>
-              <label className="full">
-                Observações (opcional)
-                <textarea name="notes" />
-              </label>
             </div>
-            <NumberGrid numbers={myNumbers} sold={sold} selected={new Set(selectedNumbers)} onToggle={toggleNumber} />
-            <div className="btn-row">
-              <button className="btn btn-primary" type="submit" disabled={!selectedNumbers.length}>
-                Salvar venda ({selectedNumbers.length} nº · {brl(selectedNumbers.length * (activeRaffles.find((r) => r.id === currentRaffleId)?.ticketPrice || 0))})
-              </button>
-            </div>
+            {!openBlock ? (
+              <p className="empty">Escolha um bloco primeiro para ver os números disponíveis.</p>
+            ) : (
+              <>
+                <div className="form-grid">
+                  <input type="hidden" name="raffleId" value={currentRaffleId} />
+                  <label>
+                    Comprador
+                    <input name="buyerName" required />
+                  </label>
+                  <label>
+                    WhatsApp
+                    <input name="buyerPhone" />
+                  </label>
+                  <label className="full">
+                    Forma de recebimento
+                    <select value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value as PaymentMethod)} required>
+                      <option value="dinheiro">Dinheiro</option>
+                      <option value="pix">PIX</option>
+                    </select>
+                  </label>
+                  {paymentMethod === 'pix' && (
+                    <label className="full">
+                      PIX caiu em qual conta?
+                      <select value={pixDestination} onChange={(e) => setPixDestination(e.target.value as PixDestination)} required>
+                        <option value="entidade">Conta da entidade</option>
+                        <option value="vendedor">Minha conta (vendedor)</option>
+                      </select>
+                    </label>
+                  )}
+                  {paymentMethod === 'pix' && (
+                    <label className="full">
+                      Já recebeu este PIX?
+                      <select name="receivedNow" defaultValue="nao">
+                        <option value="nao">Ainda não (fica pendente)</option>
+                        <option value="sim">Sim, já caiu</option>
+                      </select>
+                    </label>
+                  )}
+                  <label className="full">
+                    TXID / End-to-end (opcional)
+                    <input name="proofTxid" placeholder="Do comprovante, se tiver" />
+                  </label>
+                  <label className="full">
+                    Observações (opcional)
+                    <textarea name="notes" />
+                  </label>
+                </div>
+                <NumberGrid numbers={myNumbers} sold={sold} selected={new Set(selectedNumbers)} onToggle={toggleNumber} />
+                <div className="btn-row">
+                  <button className="btn btn-primary" type="submit" disabled={!selectedNumbers.length}>
+                    Salvar venda ({selectedNumbers.length} nº ·{' '}
+                    {brl(selectedNumbers.length * (activeRaffles.find((r) => r.id === currentRaffleId)?.ticketPrice || 0))})
+                  </button>
+                </div>
+              </>
+            )}
           </form>
           <div className="panel">
             <div className="panel-head">
@@ -382,7 +419,7 @@ export default function LocalApp() {
                 className="btn btn-secondary"
                 onClick={() => {
                   seedDemo()
-                  showToast('Demo: Carlos PIN 1234 (1-50), Fernanda PIN 5678 (51-100).')
+                  showToast('Demo: 4 blocos×50. Carlos PIN 1234 (blocos 1–2), Fernanda PIN 5678 (3–4).')
                 }}
               >
                 Carregar demo
@@ -488,25 +525,42 @@ export default function LocalApp() {
             onSubmit={(e) => {
               e.preventDefault()
               const fd = new FormData(e.currentTarget)
-              const result = assignRange({
-                memberId: String(fd.get('memberId') || ''),
-                raffleId: String(fd.get('raffleId') || ''),
-                fromNumber: Number(fd.get('fromNumber')),
-                toNumber: Number(fd.get('toNumber')),
-              })
+              const result = assignBlock(String(fd.get('blockId') || ''), String(fd.get('memberId') || ''))
               if (!result.ok) return showToast(result.error || 'Erro')
               e.currentTarget.reset()
-              showToast('Faixa atribuída.')
+              showToast('Bloco atribuído.')
             }}
           >
             <div className="panel-head">
               <div>
-                <h2>Atribuir números (X até Y)</h2>
+                <h2>Atribuir / transferir bloco</h2>
+                <p>Passe bloco de um membro para outro quando alguém vender mais rápido.</p>
               </div>
             </div>
             <div className="form-grid">
               <label className="full">
-                Membro
+                Bloco
+                <select name="blockId" required defaultValue="">
+                  <option value="" disabled>
+                    Selecione
+                  </option>
+                  {blocks
+                    .slice()
+                    .sort((a, b) => a.index - b.index)
+                    .map((b) => {
+                      const owner = members.find((m) => m.id === b.memberId)?.name || 'livre'
+                      const raffle = raffles.find((r) => r.id === b.raffleId)
+                      const st = blockStats(b.id)
+                      return (
+                        <option key={b.id} value={b.id}>
+                          {raffle?.eventName || 'Evento'} · {b.label} ({b.fromNumber}–{b.toNumber}) · {owner} · {st.open} abertos
+                        </option>
+                      )
+                    })}
+                </select>
+              </label>
+              <label className="full">
+                Para o membro
                 <select name="memberId" required defaultValue="">
                   <option value="" disabled>
                     Selecione
@@ -518,60 +572,46 @@ export default function LocalApp() {
                   ))}
                 </select>
               </label>
-              <label className="full">
-                Evento/rifa
-                <select name="raffleId" required defaultValue="">
-                  <option value="" disabled>
-                    Selecione
-                  </option>
-                  {raffles.map((r) => (
-                    <option key={r.id} value={r.id}>
-                      {r.eventName} — {r.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                De
-                <input name="fromNumber" type="number" min={1} required />
-              </label>
-              <label>
-                Até
-                <input name="toNumber" type="number" min={1} required />
-              </label>
             </div>
             <div className="btn-row">
               <button className="btn btn-primary" type="submit">
-                Amarrar faixa
+                Transferir / atribuir
               </button>
             </div>
           </form>
 
           <div className="panel" style={{ gridColumn: '1 / -1' }}>
-            <h2>Membros e faixas</h2>
-            {members.map((m) => (
-              <article key={m.id} style={{ marginBottom: '1rem' }}>
-                <strong>{m.name}</strong> · PIN {m.pin}
-                <div className="hint">
-                  {numberRanges
-                    .filter((r) => r.memberId === m.id)
-                    .map((r) => {
-                      const raffle = raffles.find((x) => x.id === r.raffleId)
-                      return (
-                        <div key={r.id}>
-                          {raffle?.eventName || 'Rifa'}: {r.fromNumber}–{r.toNumber}{' '}
-                          <button type="button" className="btn btn-ghost" onClick={() => removeRange(r.id)}>
-                            remover faixa
-                          </button>
-                        </div>
-                      )
-                    })}
-                </div>
-                <button type="button" className="btn btn-danger" onClick={() => removeMember(m.id)}>
-                  Remover membro
-                </button>
-              </article>
-            ))}
+            <h2>Membros e blocos</h2>
+            {members.map((m) => {
+              const st = memberBlockStats(m.id)
+              return (
+                <article key={m.id} style={{ marginBottom: '1rem' }}>
+                  <strong>{m.name}</strong> · PIN {m.pin}
+                  <div className="hint">
+                    {st.blocks} blocos · {st.openBlocks} com aberto · {st.soldOutBlocks} esgotados · {st.openNumbers} nº livres
+                  </div>
+                  <div className="hint">
+                    {blocks
+                      .filter((b) => b.memberId === m.id)
+                      .sort((a, b) => a.index - b.index)
+                      .map((b) => {
+                        const bs = blockStats(b.id)
+                        return (
+                          <div key={b.id}>
+                            {b.label} ({b.fromNumber}–{b.toNumber}) · {bs.open} abertos{' '}
+                            <button type="button" className="btn btn-ghost" onClick={() => unassignBlock(b.id)}>
+                              liberar
+                            </button>
+                          </div>
+                        )
+                      })}
+                  </div>
+                  <button type="button" className="btn btn-danger" onClick={() => removeMember(m.id)}>
+                    Remover membro
+                  </button>
+                </article>
+              )
+            })}
           </div>
         </section>
       )}
@@ -583,20 +623,23 @@ export default function LocalApp() {
             onSubmit={(e) => {
               e.preventDefault()
               const fd = new FormData(e.currentTarget)
-              addRaffle({
+              const result = addRaffle({
                 eventName: String(fd.get('eventName') || ''),
                 name: String(fd.get('name') || ''),
                 prize: String(fd.get('prize') || ''),
                 ticketPrice: Number(fd.get('ticketPrice')),
-                totalNumbers: Number(fd.get('totalNumbers')),
+                blockCount: Number(fd.get('blockCount')),
+                numbersPerBlock: Number(fd.get('numbersPerBlock')),
               })
+              if (!result.ok) return showToast(result.error)
               e.currentTarget.reset()
-              showToast('Evento/rifa criado.')
+              showToast(`Evento criado com ${result.raffle.blockCount} blocos.`)
             }}
           >
             <div className="panel-head">
               <div>
-                <h2>Novo evento / rifa</h2>
+                <h2>Novo evento / rifa por blocos</h2>
+                <p>Ex.: 4 blocos × 50 cartelas = 200 números (01–50, 51–100…).</p>
               </div>
             </div>
             <div className="form-grid">
@@ -613,8 +656,12 @@ export default function LocalApp() {
                 <input name="ticketPrice" type="number" step="0.01" min="0.01" required />
               </label>
               <label>
-                Total de números
-                <input name="totalNumbers" type="number" min="1" required />
+                Qtd. de blocos
+                <input name="blockCount" type="number" min="1" required defaultValue={4} />
+              </label>
+              <label>
+                Cartelas por bloco
+                <input name="numbersPerBlock" type="number" min="1" required defaultValue={50} />
               </label>
               <label className="full">
                 Prêmio
@@ -623,17 +670,31 @@ export default function LocalApp() {
             </div>
             <div className="btn-row">
               <button className="btn btn-primary" type="submit">
-                Criar
+                Criar com blocos
               </button>
             </div>
           </form>
           <div className="panel">
-            <h2>Eventos</h2>
+            <h2>Eventos e blocos</h2>
             {raffles.map((r) => (
               <article key={r.id} style={{ marginBottom: '0.85rem' }}>
                 <strong>{r.eventName}</strong>
                 <div className="hint">
-                  {r.name} · {brl(r.ticketPrice)} · {r.totalNumbers} números · {r.prize}
+                  {r.name} · {brl(r.ticketPrice)} · {r.blockCount || '?'} blocos × {r.numbersPerBlock || '?'} = {r.totalNumbers} nº · {r.prize}
+                </div>
+                <div className="hint">
+                  {blocks
+                    .filter((b) => b.raffleId === r.id)
+                    .sort((a, b) => a.index - b.index)
+                    .map((b) => {
+                      const owner = members.find((m) => m.id === b.memberId)?.name || 'livre'
+                      const st = blockStats(b.id)
+                      return (
+                        <div key={b.id}>
+                          {b.label}: {b.fromNumber}–{b.toNumber} · {owner} · {st.open} abertos
+                        </div>
+                      )
+                    })}
                 </div>
                 <button type="button" className="btn btn-danger" onClick={() => removeRaffle(r.id)}>
                   Remover
@@ -806,8 +867,8 @@ export default function LocalApp() {
         <section className="panel">
           <div className="panel-head">
             <div>
-              <h2>Relatórios / prestação de contas</h2>
-              <p>Dinheiro e PIX na conta do vendedor ficam em aberto até registrar a entrega à entidade.</p>
+              <h2>Relatórios / blocos / prestação</h2>
+              <p>Quem tem mais blocos em aberto, quem esgotou, e valores a prestar.</p>
             </div>
           </div>
           <div className="table-wrap">
@@ -815,58 +876,65 @@ export default function LocalApp() {
               <thead>
                 <tr>
                   <th>Membro</th>
+                  <th>Blocos</th>
+                  <th>Com aberto</th>
+                  <th>Esgotados</th>
+                  <th>Nº abertos</th>
                   <th>Nº vendidos</th>
-                  <th>Esperado</th>
-                  <th>Recebido</th>
                   <th>Dinheiro c/ ele</th>
-                  <th>PIX entidade</th>
-                  <th>PIX vendedor em aberto</th>
+                  <th>PIX vendedor aberto</th>
                   <th></th>
                 </tr>
               </thead>
               <tbody>
-                {reports.map((r) => (
-                  <tr key={r.member.id}>
-                    <td>{r.member.name}</td>
-                    <td>{r.soldCount}</td>
-                    <td>{brl(r.expected)}</td>
-                    <td>{brl(r.received)}</td>
-                    <td>{brl(r.cashOpen)}</td>
-                    <td>{brl(r.pixEntidade)}</td>
-                    <td>{brl(r.pixVendedorOpen)}</td>
-                    <td>
-                      {r.cashOpen > 0 && (
-                        <button
-                          type="button"
-                          className="btn btn-secondary"
-                          onClick={() => {
-                            addMemberSettlement({ memberId: r.member.id, amount: r.cashOpen, kind: 'dinheiro', note: 'Prestação dinheiro' })
-                            showToast('Dinheiro quitado com a entidade.')
-                          }}
-                        >
-                          Receber dinheiro
-                        </button>
-                      )}
-                      {r.pixVendedorOpen > 0 && (
-                        <button
-                          type="button"
-                          className="btn btn-secondary"
-                          onClick={() => {
-                            addMemberSettlement({
-                              memberId: r.member.id,
-                              amount: r.pixVendedorOpen,
-                              kind: 'pix_vendedor',
-                              note: 'Repasse PIX vendedor',
-                            })
-                            showToast('PIX do vendedor prestado.')
-                          }}
-                        >
-                          Receber PIX vendedor
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
+                {[...reports]
+                  .sort((a, b) => memberBlockStats(b.member.id).openNumbers - memberBlockStats(a.member.id).openNumbers)
+                  .map((r) => {
+                    const bs = memberBlockStats(r.member.id)
+                    return (
+                      <tr key={r.member.id}>
+                        <td>{r.member.name}</td>
+                        <td>{bs.blocks}</td>
+                        <td>{bs.openBlocks}</td>
+                        <td>{bs.soldOutBlocks}</td>
+                        <td>{bs.openNumbers}</td>
+                        <td>{bs.soldNumbers}</td>
+                        <td>{brl(r.cashOpen)}</td>
+                        <td>{brl(r.pixVendedorOpen)}</td>
+                        <td>
+                          {r.cashOpen > 0 && (
+                            <button
+                              type="button"
+                              className="btn btn-secondary"
+                              onClick={() => {
+                                addMemberSettlement({ memberId: r.member.id, amount: r.cashOpen, kind: 'dinheiro', note: 'Prestação dinheiro' })
+                                showToast('Dinheiro quitado com a entidade.')
+                              }}
+                            >
+                              Receber dinheiro
+                            </button>
+                          )}
+                          {r.pixVendedorOpen > 0 && (
+                            <button
+                              type="button"
+                              className="btn btn-secondary"
+                              onClick={() => {
+                                addMemberSettlement({
+                                  memberId: r.member.id,
+                                  amount: r.pixVendedorOpen,
+                                  kind: 'pix_vendedor',
+                                  note: 'Repasse PIX vendedor',
+                                })
+                                showToast('PIX do vendedor prestado.')
+                              }}
+                            >
+                              Receber PIX vendedor
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    )
+                  })}
               </tbody>
             </table>
           </div>

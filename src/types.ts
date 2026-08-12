@@ -9,23 +9,37 @@ export interface Raffle {
   ticketPrice: number
   totalNumbers: number
   prize: string
-  /** Evento/campanha (ex.: Festa Junina 2026) */
   eventName: string
   createdAt: string
   active: boolean
+  /** Quantidade de blocos (ex.: 4) */
+  blockCount?: number
+  /** Números/cartelas por bloco (ex.: 50) */
+  numbersPerBlock?: number
 }
 
 export interface Member {
   id: string
   name: string
   phone?: string
-  /** PIN numérico simples para login do membro */
   pin: string
   active: boolean
   createdAt: string
 }
 
-/** Faixa de números do membro em uma rifa/evento */
+/** Bloco de números (ex.: Bloco 1 = 01–50) */
+export interface Block {
+  id: string
+  raffleId: string
+  index: number
+  label: string
+  fromNumber: number
+  toNumber: number
+  memberId?: string
+  createdAt: string
+}
+
+/** Legado — faixas livres; preferir Block */
 export interface NumberRange {
   id: string
   memberId: string
@@ -46,10 +60,11 @@ export interface Sale {
   paidAmount: number
   status: PaymentStatus
   paymentMethod: PaymentMethod
-  /** Só faz sentido para PIX */
   pixDestination?: PixDestination
   notes?: string
   createdAt: string
+  /** Bloco de origem da venda, quando aplicável */
+  blockId?: string
 }
 
 export interface PixPayment {
@@ -86,7 +101,6 @@ export interface PixCharge {
   proofImageDataUrl?: string
 }
 
-/** Prestação de contas do membro (dinheiro/PIX na conta dele entregue à entidade) */
 export interface MemberSettlement {
   id: string
   memberId: string
@@ -100,6 +114,7 @@ export interface MemberSettlement {
 export interface AppState {
   raffles: Raffle[]
   members: Member[]
+  blocks: Block[]
   numberRanges: NumberRange[]
   sales: Sale[]
   pixPayments: PixPayment[]

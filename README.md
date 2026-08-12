@@ -49,7 +49,15 @@ Body mínimo:
 }
 ```
 
-## Baixa por TXID via CSV (recomendado sem webhook)
+## Equipe (ADM x membro)
+
+- **ADM**: cadastra membros, amarra faixas (ex.: 1–50), eventos, CSV/TXID, baixas e relatórios
+- **Membro**: entra com PIN, vê grade dos números (verde/vermelho) e lança só os dele
+- Recebimento: **dinheiro** ou **PIX** (conta da entidade ou do vendedor)
+- Relatórios de prestação de contas no painel ADM
+
+Demo local: **Carregar demo** → Carlos PIN `1234` (1–50), Fernanda PIN `5678` (51–100).
+
 
 1. Na venda, clique **Gerar TXID** (ou vincule o TXID do seu banco na aba TXID/Cobranças)
 2. Exporte o extrato PIX em CSV com coluna `TXID` (ou End-to-end)

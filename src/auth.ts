@@ -87,18 +87,23 @@ export async function loginAdmin(password: string) {
   await createAdminSession()
 }
 
-async function createAdminSession() {
+async function createAdminSession(organizerName?: string) {
   const tokenBytes = crypto.getRandomValues(new Uint8Array(24))
   const session: SessionRecord = {
     token: toBase64(tokenBytes.buffer),
     expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
     role: 'admin',
+    memberName: organizerName,
   }
   sessionStorage.setItem(SESSION_KEY, JSON.stringify(session))
 }
 
-export function loginMember(memberId: string, memberName: string, pin: string, expectedPin: string) {
-  if (pin.trim() !== expectedPin.trim()) throw new Error('PIN incorreto.')
+/** Sessão ADM sem senha local (modo Supabase). */
+export async function loginAdminSession(organizerName?: string) {
+  await createAdminSession(organizerName)
+}
+
+export function loginMemberSession(memberId: string, memberName: string) {
   const tokenBytes = crypto.getRandomValues(new Uint8Array(24))
   const session: SessionRecord = {
     token: toBase64(tokenBytes.buffer),
@@ -108,6 +113,11 @@ export function loginMember(memberId: string, memberName: string, pin: string, e
     memberName,
   }
   sessionStorage.setItem(SESSION_KEY, JSON.stringify(session))
+}
+
+export function loginMember(memberId: string, memberName: string, pin: string, expectedPin: string) {
+  if (pin.trim() !== expectedPin.trim()) throw new Error('PIN incorreto.')
+  loginMemberSession(memberId, memberName)
 }
 
 export function logout() {

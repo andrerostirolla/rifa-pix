@@ -4,24 +4,42 @@ Conferência de PIX + amortização para vendas de rifas.
 
 ## Modos
 
-1. **Local** (padrão sem env): senha no navegador + `localStorage`
-2. **Nuvem** (com Supabase): Auth + Postgres + cobrança PIX + webhook de baixa automática
+1. **Local** (padrão sem env): senha no navegador + `localStorage` (~5 MB)
+2. **Nuvem** (com Supabase): mesmo app (equipe/blocos), dados no **Postgres** sincronizados
 
 App online (estático): https://andrerostirolla.github.io/rifa-pix/
 
-## Subir o banco (Supabase)
+## Ligar Supabase (recomendado)
 
-1. Crie um projeto em https://supabase.com/dashboard
-2. SQL Editor → rode o arquivo `supabase/migrations/20260812000000_init.sql`
-3. Settings → API: copie URL e `anon` key
-4. Crie `.env` (ou secrets no host):
+### Capacidade (plano Free)
 
-```bash
-VITE_SUPABASE_URL=https://xxxx.supabase.co
-VITE_SUPABASE_ANON_KEY=eyJ...
-```
+- **Database:** ~500 MB Postgres
+- **Storage:** ~1 GB (depois, se formos mover comprovantes)
+- **Egress:** ~5 GB/mês
+- Mais do que suficiente para o estado da rifa; comprovantes em base64 incham o JSON — use com moderação
 
-5. Deploy das Edge Functions:
+### Passo a passo
+
+1. Crie um projeto em https://supabase.com/dashboard (Free)
+2. **SQL Editor** → rode, nesta ordem:
+   - `supabase/migrations/20260812000000_init.sql`
+   - `supabase/migrations/20260812210000_workspaces.sql`
+3. **Authentication → Providers → Email**: e-mail/senha ativo. Em teste, pode desligar “Confirm email”
+4. **Settings → API**: copie **Project URL** e **anon public** key
+5. No GitHub do repo → **Settings → Secrets and variables → Actions**, crie:
+   - `VITE_SUPABASE_URL`
+   - `VITE_SUPABASE_ANON_KEY`
+6. Push em `main` (ou *Actions → Deploy GitHub Pages → Run workflow*)
+
+Local opcional: `cp .env.example .env` e preencha as mesmas variáveis.
+
+### Como usar depois de ligado
+
+- **ADM:** criar conta / entrar com e-mail e senha. No Painel aparece o **código da equipe**
+- **Membro:** login → Membro → código da equipe → Buscar membros → PIN
+- Dados sobem/descem da nuvem automaticamente (com cache local)
+
+## Edge Functions (PIX webhook — opcional)
 
 ```bash
 npx supabase login
@@ -38,33 +56,13 @@ Webhook URL (PSP/banco):
 
 Header: `x-webhook-secret: um-segredo-forte`
 
-Body mínimo:
-
-```json
-{
-  "txid": "rifa...",
-  "amount": 30,
-  "payerName": "Maria Souza",
-  "paidAt": "2026-08-12T12:00:00Z"
-}
-```
-
 ## Equipe (ADM x membro)
 
-- **ADM**: cadastra membros, amarra faixas (ex.: 1–50), eventos, CSV/TXID, baixas e relatórios
-- **Membro**: entra com PIN, vê grade dos números (verde/vermelho) e lança só os dele
-- Recebimento: **dinheiro** ou **PIX** (conta da entidade ou do vendedor)
-- Relatórios de prestação de contas no painel ADM
+- **ADM**: cadastra membros, blocos, eventos, CSV/TXID, baixas e relatórios
+- **Membro**: entra com PIN, vê grade dos números e lança só os dele
+- Recebimento: **dinheiro** ou **PIX** (entidade ou vendedor)
 
-Demo local: **Carregar demo** → Carlos PIN `1234` (1–50), Fernanda PIN `5678` (51–100).
-
-
-1. Na venda, clique **Gerar TXID** (ou vincule o TXID do seu banco na aba TXID/Cobranças)
-2. Exporte o extrato PIX em CSV com coluna `TXID` (ou End-to-end)
-3. Importe na aba PIX → o sistema mostra os matches de **alta confiança**
-4. Confirme: as vendas com TXID idêntico são baixadas automaticamente
-
-Isso é mais assertivo que casar só por nome/valor.
+Demo local: **Carregar demo** → Carlos PIN `1234`, Fernanda PIN `5678`.
 
 ## Rodar local
 
@@ -75,10 +73,3 @@ npm run dev
 ```
 
 Abra `http://localhost:5173/rifa-pix/`.
-
-## CSV de PIX
-
-```csv
-Data;Valor;Nome;TXID
-11/08/2026;30,00;Maria Souza;PIX-MARIA-30
-```

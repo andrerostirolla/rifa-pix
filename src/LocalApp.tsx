@@ -3,6 +3,8 @@ import type { FormEvent } from 'react'
 import { getAuthRecord, getSession, logout } from './auth'
 import { parsePixCsv, SAMPLE_CSV } from './csvImport'
 import { NumberGrid } from './NumberGrid'
+import { isSupabaseConfigured, supabase } from './lib/supabase'
+import { loadCloudSession, saveCloudSession } from './lib/workspace'
 import { brl, formatNumbers, useStore } from './store'
 import { previewTxidMatches } from './txidMatch'
 import type { CashDestination, PaymentMethod, PaymentStatus, PixDestination } from './types'
@@ -200,7 +202,9 @@ export default function LocalApp() {
     return { expected, received, cashLoja, cashVendedorOpen, pixEntidade, pixVendedorOpen }
   }, [sales, reports])
 
-  const who = isAdmin ? getAuthRecord()?.organizerName || 'ADM' : session?.memberName || 'Membro'
+  const who = isAdmin
+    ? getAuthRecord()?.organizerName || session?.memberName || 'ADM'
+    : session?.memberName || 'Membro'
 
   const toggleNumber = (n: number) => {
     setSelectedNumbers((prev) => (prev.includes(n) ? prev.filter((x) => x !== n) : [...prev, n].sort((a, b) => a - b)))
@@ -301,8 +305,10 @@ export default function LocalApp() {
           <button
             type="button"
             className="btn btn-secondary"
-            onClick={() => {
+            onClick={async () => {
+              saveCloudSession(null)
               logout()
+              if (isSupabaseConfigured && supabase) await supabase.auth.signOut()
               window.location.reload()
             }}
           >
@@ -555,6 +561,12 @@ export default function LocalApp() {
             <div>
               <h2>Painel ADM</h2>
               <p>Cadastre equipe e faixas, depois cada membro vende só os números dele.</p>
+              {isSupabaseConfigured && loadCloudSession()?.workspace.accessCode && (
+                <p className="hint">
+                  Nuvem ligada · código da equipe para membros:{' '}
+                  <strong>{loadCloudSession()!.workspace.accessCode}</strong>
+                </p>
+              )}
             </div>
             <div className="btn-row" style={{ marginTop: 0 }}>
               <button

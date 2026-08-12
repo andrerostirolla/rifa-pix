@@ -1,11 +1,28 @@
 import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
-import { getAuthRecord, hasPasswordSetup, loginAdmin, loginMember, setupPassword } from './auth'
+import {
+  getAuthRecord,
+  hasPasswordSetup,
+  loginAdmin,
+  loginAdminSession,
+  loginMember,
+  loginMemberSession,
+  setupPassword,
+} from './auth'
 import { isSupabaseConfigured } from './lib/supabase'
 import { useAuth } from './lib/useAuth'
+import {
+  emptyishState,
+  ensureOwnerWorkspace,
+  openAsMember,
+  peekMembers,
+  saveCloudSession,
+  saveOwnerWorkspaceState,
+} from './lib/workspace'
 import { useStore } from './store'
 
 const MEMBER_REMEMBER_KEY = 'rifa-pix-remember-member-v1'
+const WORKSPACE_CODE_KEY = 'rifa-pix-workspace-code-v1'
 
 type RememberedMember = {
   memberId: string
@@ -30,14 +47,19 @@ function loadRemembered(): RememberedMember | null {
 export function LoginScreen({ onLocalAuthenticated }: Props) {
   const auth = useAuth()
   const members = useStore((s) => s.members)
+  const importSnapshot = useStore((s) => s.importSnapshot)
+  const exportSnapshot = useStore((s) => s.exportSnapshot)
   const existing = getAuthRecord()
   const isLocalSetup = !hasPasswordSetup()
   const remembered = loadRemembered()
   const [mode, setMode] = useState<'login' | 'signup'>('login')
+  const [cloudRole, setCloudRole] = useState<'admin' | 'member'>('admin')
   const [localRole, setLocalRole] = useState<'admin' | 'member'>(remembered ? 'member' : 'admin')
   const [memberId, setMemberId] = useState(remembered?.memberId || '')
   const [pin, setPin] = useState(remembered?.rememberPin ? remembered.pin || '' : '')
   const [rememberPin, setRememberPin] = useState(Boolean(remembered?.rememberPin))
+  const [workspaceCode, setWorkspaceCode] = useState(() => localStorage.getItem(WORKSPACE_CODE_KEY) || '')
+  const [cloudMembers, setCloudMembers] = useState<Array<{ id: string; name: string }>>([])
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [info, setInfo] = useState<string | null>(null)
@@ -50,6 +72,14 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
     }
   }, [members, remembered?.memberId, remembered?.pin, remembered?.rememberPin])
 
+  const loadCloudMemberList = async (code: string) => {
+    const peek = await peekMembers(code)
+    setCloudMembers(peek.members || [])
+    localStorage.setItem(WORKSPACE_CODE_KEY, code.trim().toUpperCase())
+    setInfo(`Workspace “${peek.name}” · ${peek.members?.length || 0} membros`)
+    return peek
+  }
+
   const onSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault()
     setError(null)
@@ -58,14 +88,58 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
     const fd = new FormData(e.currentTarget)
     try {
       if (isSupabaseConfigured) {
-        const email = String(fd.get('email') || '').trim()
-        const password = String(fd.get('password') || '')
-        const organizerName = String(fd.get('organizerName') || '')
-        if (mode === 'signup') {
-          await auth.signUp(email, password, organizerName)
-          setInfo('Conta criada. Se o projeto exigir confirmação de e-mail, verifique sua caixa de entrada.')
-        } else {
+        if (cloudRole === 'admin') {
+          const email = String(fd.get('email') || '').trim()
+          const password = String(fd.get('password') || '')
+          const organizerName = String(fd.get('organizerName') || '')
+          if (mode === 'signup') {
+            await auth.signUp(email, password, organizerName)
+            setInfo('Conta criada. Se o projeto exigir confirmação de e-mail, verifique sua caixa de entrada e entre.')
+            return
+          }
           await auth.signIn(email, password)
+          const { meta, state } = await ensureOwnerWorkspace(organizerName || 'RifaPIX')
+          if (!emptyishState(state)) {
+            importSnapshot(state!)
+          } else {
+            const local = exportSnapshot()
+            if (!emptyishState(local)) {
+              const updatedAt = await saveOwnerWorkspaceState(meta.id, local)
+              meta.updatedAt = updatedAt
+            }
+          }
+          saveCloudSession({ role: 'admin', workspace: meta })
+          await loginAdminSession(meta.name || organizerName || 'ADM')
+          setInfo(`Nuvem ok. Código da equipe: ${meta.accessCode}`)
+          onLocalAuthenticated()
+        } else {
+          const code = (workspaceCode || String(fd.get('workspaceCode') || '')).trim()
+          if (!code) throw new Error('Informe o código do workspace.')
+          let list = cloudMembers
+          if (!list.length) {
+            const peek = await loadCloudMemberList(code)
+            list = peek.members
+          }
+          const selectedId = memberId || String(fd.get('memberId') || '')
+          const usedPin = pin || String(fd.get('pin') || '')
+          if (!selectedId) throw new Error('Selecione o membro.')
+          const opened = await openAsMember(code, selectedId, usedPin)
+          importSnapshot(opened.state)
+          saveCloudSession({
+            role: 'member',
+            workspace: opened.meta,
+            memberId: opened.memberId,
+            memberName: opened.memberName,
+          })
+          loginMemberSession(opened.memberId, opened.memberName)
+          const payload: RememberedMember = {
+            memberId: opened.memberId,
+            memberName: opened.memberName,
+            rememberPin,
+            pin: rememberPin ? usedPin : undefined,
+          }
+          localStorage.setItem(MEMBER_REMEMBER_KEY, JSON.stringify(payload))
+          onLocalAuthenticated()
         }
       } else if (isLocalSetup) {
         const password = String(fd.get('password') || '')
@@ -110,18 +184,41 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
     )
   }
 
+  const memberOptions = isSupabaseConfigured ? cloudMembers : members.filter((m) => m.active).map((m) => ({ id: m.id, name: m.name }))
+
   return (
     <div className="auth-shell">
       <form className="auth-card panel" onSubmit={onSubmit} autoComplete="on">
         <p className="brand">RifaPIX</p>
-        <h1>{isSupabaseConfigured ? (mode === 'signup' ? 'Criar conta' : 'Entrar') : isLocalSetup ? 'Criar ADM' : 'Entrar'}</h1>
+        <h1>
+          {isSupabaseConfigured
+            ? cloudRole === 'member'
+              ? 'Entrar como membro'
+              : mode === 'signup'
+                ? 'Criar conta ADM'
+                : 'Entrar ADM'
+            : isLocalSetup
+              ? 'Criar ADM'
+              : 'Entrar'}
+        </h1>
         <p className="hint">
           {isSupabaseConfigured
-            ? 'Modo nuvem (Supabase).'
+            ? 'Modo nuvem (Supabase). ADM usa e-mail; membro usa o código da equipe + PIN.'
             : isLocalSetup
               ? 'Primeiro acesso: defina a senha do administrador.'
               : 'ADM vê tudo. Membro vê só seus blocos e vendas.'}
         </p>
+
+        {isSupabaseConfigured && (
+          <div className="role-switch">
+            <button type="button" className={cloudRole === 'admin' ? 'active' : ''} onClick={() => setCloudRole('admin')}>
+              Administrador
+            </button>
+            <button type="button" className={cloudRole === 'member' ? 'active' : ''} onClick={() => setCloudRole('member')}>
+              Membro
+            </button>
+          </div>
+        )}
 
         {!isSupabaseConfigured && !isLocalSetup && (
           <div className="role-switch">
@@ -134,7 +231,7 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
           </div>
         )}
 
-        {isSupabaseConfigured ? (
+        {isSupabaseConfigured && cloudRole === 'admin' ? (
           <>
             {mode === 'signup' && (
               <label>
@@ -149,6 +246,77 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
             <label>
               Senha
               <input name="password" type="password" required minLength={6} autoComplete="current-password" />
+            </label>
+          </>
+        ) : isSupabaseConfigured && cloudRole === 'member' ? (
+          <>
+            <label>
+              Código da equipe
+              <input
+                name="workspaceCode"
+                required
+                value={workspaceCode}
+                onChange={(e) => setWorkspaceCode(e.target.value.toUpperCase())}
+                placeholder="Ex.: AB12CD"
+                autoComplete="organization"
+              />
+            </label>
+            <div className="btn-row">
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={busy || !workspaceCode.trim()}
+                onClick={async () => {
+                  setError(null)
+                  setBusy(true)
+                  try {
+                    await loadCloudMemberList(workspaceCode)
+                  } catch (err) {
+                    setError(err instanceof Error ? err.message : 'Código inválido')
+                  } finally {
+                    setBusy(false)
+                  }
+                }}
+              >
+                Buscar membros
+              </button>
+            </div>
+            <label>
+              Membro
+              <select
+                name="memberId"
+                required
+                value={memberId}
+                onChange={(e) => setMemberId(e.target.value)}
+                autoComplete="username"
+              >
+                <option value="" disabled>
+                  Selecione
+                </option>
+                {memberOptions.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              PIN
+              <input
+                name="pin"
+                type="password"
+                inputMode="numeric"
+                required
+                minLength={4}
+                placeholder="PIN do membro"
+                value={pin}
+                onChange={(e) => setPin(e.target.value)}
+                autoComplete="current-password"
+              />
+            </label>
+            <label className="check-row">
+              <input type="checkbox" checked={rememberPin} onChange={(e) => setRememberPin(e.target.checked)} />
+              Lembrar PIN neste aparelho
             </label>
           </>
         ) : isLocalSetup ? (
@@ -185,17 +353,17 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
                 <option value="" disabled>
                   Selecione
                 </option>
-                {members
-                  .filter((m) => m.active)
-                  .map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.name}
-                    </option>
-                  ))}
+                {memberOptions.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name}
+                  </option>
+                ))}
               </select>
             </label>
             {remembered?.memberName && memberId === remembered.memberId && (
-              <p className="hint">Último acesso: <strong>{remembered.memberName}</strong></p>
+              <p className="hint">
+                Último acesso: <strong>{remembered.memberName}</strong>
+              </p>
             )}
             <label>
               PIN
@@ -215,12 +383,8 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
               <input type="checkbox" checked={rememberPin} onChange={(e) => setRememberPin(e.target.checked)} />
               Lembrar PIN neste aparelho (Face ID / chaveiro do celular pode preencher também)
             </label>
-            <p className="hint">
-              No iPhone/Android, aceite salvar a senha no navegador para desbloquear com Face ID / biometria.
-            </p>
-            {!members.filter((m) => m.active).length && (
-              <p className="hint">Nenhum membro cadastrado. Entre como ADM e cadastre na aba Equipe.</p>
-            )}
+            <p className="hint">No iPhone/Android, aceite salvar a senha no navegador para desbloquear com Face ID / biometria.</p>
+            {!memberOptions.length && <p className="hint">Nenhum membro cadastrado. Entre como ADM e cadastre na aba Equipe.</p>}
           </>
         )}
 
@@ -234,7 +398,7 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
           <button className="btn btn-primary" type="submit" disabled={busy}>
             {busy ? 'Aguarde…' : 'Entrar'}
           </button>
-          {isSupabaseConfigured && (
+          {isSupabaseConfigured && cloudRole === 'admin' && (
             <button type="button" className="btn btn-secondary" onClick={() => setMode((m) => (m === 'login' ? 'signup' : 'login'))}>
               {mode === 'login' ? 'Criar conta' : 'Já tenho conta'}
             </button>

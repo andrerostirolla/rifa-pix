@@ -8,6 +8,7 @@ import {
   fetchByAccessCode,
   fetchOwnerWorkspace,
   loadCloudSession,
+  peekWorkspaceUpdatedAt,
   saveByAccessCode,
   saveCloudSession,
   saveOwnerWorkspaceState,
@@ -25,8 +26,8 @@ type Props = {
 
 type SyncStatus = 'sincronizado' | 'salvando' | 'baixando' | 'offline'
 
-const PUSH_DEBOUNCE_MS = 450
-const PULL_INTERVAL_MS = 3000
+const PUSH_DEBOUNCE_MS = 200
+const PULL_INTERVAL_MS = 1200
 
 function snapshotFromStore(): AppState {
   const s = useStore.getState()
@@ -47,10 +48,14 @@ function snapshotFromStore(): AppState {
 function isNewer(remoteIso: string, localIso: string) {
   if (!remoteIso) return false
   if (!localIso) return true
-  return new Date(remoteIso).getTime() > new Date(localIso).getTime() + 50
+  return new Date(remoteIso).getTime() > new Date(localIso).getTime() + 20
 }
 
-/** Hidrata o zustand, salva rápido e puxa da nuvem o tempo todo (poll + realtime). */
+function syncChannelName(accessCode: string) {
+  return `rifa-sync-${accessCode.trim().toUpperCase()}`
+}
+
+/** Hidrata o zustand, salva rápido, broadcast + poll curto entre aparelhos. */
 export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props) {
   const [boot, setBoot] = useState(true)
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('baixando')
@@ -61,10 +66,12 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
   const applyingRemoteRef = useRef(false)
   const dirtyRef = useRef(false)
   const pushTimerRef = useRef<number | null>(null)
-  const skipPushUntilRef = useRef(0)
+  const skipPullUntilRef = useRef(0)
+  const channelRef = useRef<ReturnType<NonNullable<typeof supabase>['channel']> | null>(null)
 
   const applyRemote = (state: AppState, updatedAt: string, meta?: Partial<CloudSession['workspace']>) => {
     applyingRemoteRef.current = true
+    dirtyRef.current = false
     useStore.getState().importSnapshot(state)
     updatedAtRef.current = updatedAt
     const session = sessionRef.current
@@ -78,10 +85,27 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
     }, 0)
   }
 
+  const broadcastUpdated = async (updatedAt: string) => {
+    const session = sessionRef.current
+    if (!session || !supabase || !channelRef.current) return
+    try {
+      await channelRef.current.send({
+        type: 'broadcast',
+        event: 'workspace_updated',
+        payload: {
+          updatedAt,
+          workspaceId: session.workspace.id,
+          from: session.role,
+        },
+      })
+    } catch (err) {
+      console.warn('Broadcast sync falhou', err)
+    }
+  }
+
   const pushNow = async () => {
     const session = sessionRef.current || loadCloudSession()
     if (!session || savingRef.current || applyingRemoteRef.current) return
-    if (Date.now() < skipPushUntilRef.current) return
     savingRef.current = true
     dirtyRef.current = false
     setSyncStatus('salvando')
@@ -98,13 +122,14 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
       session.workspace.updatedAt = updatedAt
       saveCloudSession(session)
       sessionRef.current = session
-      // evita puxar de volta o próprio save por 1,2s
-      skipPushUntilRef.current = Date.now() + 200
+      // evita eco imediato do próprio save
+      skipPullUntilRef.current = Date.now() + 350
       setSyncStatus('sincronizado')
+      void broadcastUpdated(updatedAt)
     } catch (err) {
       console.warn('Falha ao salvar na nuvem', err)
       setSyncStatus('offline')
-      // se conflito, tenta baixar
+      dirtyRef.current = true
       try {
         await pullNow(true)
       } catch {
@@ -118,10 +143,27 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
   const pullNow = async (force = false) => {
     const session = sessionRef.current || loadCloudSession()
     if (!session || pullingRef.current || savingRef.current) return
-    if (!force && dirtyRef.current) return
-    if (!force && Date.now() < skipPushUntilRef.current) return
+    if (!force && Date.now() < skipPullUntilRef.current) return
+
+    // Se tem alteração local pendente, sobe antes de baixar
+    if (dirtyRef.current && !force) {
+      await pushNow()
+      return
+    }
+
     pullingRef.current = true
     try {
+      // checagem barata primeiro (se RPC existir); senão cai no fetch completo
+      try {
+        const remoteTs = await peekWorkspaceUpdatedAt(session.workspace.accessCode)
+        if (!force && !isNewer(remoteTs, updatedAtRef.current)) {
+          setSyncStatus('sincronizado')
+          return
+        }
+      } catch {
+        /* RPC ainda não aplicada — segue com fetch completo */
+      }
+
       const opened =
         session.role === 'admin' && session.workspace.id
           ? await fetchOwnerWorkspace(session.workspace.id)
@@ -221,37 +263,58 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [boot])
 
-  // Pull periódico
+  // Pull periódico + foco/visibilidade
   useEffect(() => {
     if (boot) return
     const id = window.setInterval(() => {
       void pullNow(false)
     }, PULL_INTERVAL_MS)
     const onFocus = () => {
-      void pullNow(false)
+      void pullNow(true)
     }
     const onOnline = () => {
       void pullNow(true)
     }
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') void pullNow(true)
+    }
     window.addEventListener('focus', onFocus)
     window.addEventListener('online', onOnline)
+    document.addEventListener('visibilitychange', onVisibility)
     return () => {
       window.clearInterval(id)
       window.removeEventListener('focus', onFocus)
       window.removeEventListener('online', onOnline)
+      document.removeEventListener('visibilitychange', onVisibility)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [boot])
 
-  // Realtime (ADM autenticado)
+  // Broadcast entre todos os aparelhos do mesmo código + realtime ADM
   useEffect(() => {
-    if (boot || !supabase) return
+    if (boot) return
+    const sb = supabase
+    if (!sb) return
     const session = sessionRef.current
-    if (!session?.workspace.id || session.role !== 'admin') return
+    if (!session?.workspace.accessCode) return
 
-    const channel = supabase
-      .channel(`workspace-${session.workspace.id}`)
-      .on(
+    const channel = sb.channel(syncChannelName(session.workspace.accessCode), {
+      config: { broadcast: { self: false } },
+    })
+    channelRef.current = channel
+
+    channel.on('broadcast', { event: 'workspace_updated' }, (payload) => {
+      const updatedAt = String((payload.payload as { updatedAt?: string } | undefined)?.updatedAt || '')
+      if (updatedAt && !isNewer(updatedAt, updatedAtRef.current)) return
+      if (dirtyRef.current || savingRef.current) {
+        void pushNow().then(() => pullNow(true))
+        return
+      }
+      void pullNow(true)
+    })
+
+    if (session.role === 'admin' && session.workspace.id) {
+      channel.on(
         'postgres_changes',
         {
           event: 'UPDATE',
@@ -278,10 +341,13 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
           setSyncStatus('sincronizado')
         },
       )
-      .subscribe()
+    }
+
+    channel.subscribe()
 
     return () => {
-      if (supabase) void supabase.removeChannel(channel)
+      channelRef.current = null
+      void sb.removeChannel(channel)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [boot])

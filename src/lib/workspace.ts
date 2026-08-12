@@ -164,6 +164,13 @@ export async function fetchOwnerWorkspace(workspaceId: string): Promise<{ meta: 
   }
 }
 
+export async function peekWorkspaceUpdatedAt(accessCode: string): Promise<string> {
+  const sb = client()
+  const { data, error } = await sb.rpc('workspace_updated_at', { p_code: accessCode.trim() })
+  if (error) throw error
+  return String(data)
+}
+
 export async function fetchByAccessCode(accessCode: string): Promise<{ meta: WorkspaceMeta; state: AppState }> {
   const sb = client()
   const { data, error } = await sb.rpc('fetch_workspace_by_code', { p_code: accessCode.trim() })

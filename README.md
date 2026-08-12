@@ -26,6 +26,7 @@ App online (estático): https://andrerostirolla.github.io/rifa-pix/
    - `supabase/migrations/20260812210000_workspaces.sql`
    - `supabase/migrations/20260812220000_workspaces_realtime.sql` (opcional)
    - `supabase/migrations/20260812230000_chat_messages.sql` (chat da equipe)
+   - `supabase/migrations/20260812240000_workspace_updated_at.sql` (sync mais rápida)
 3. **Authentication → Providers → Email**: e-mail/senha ativo. Em teste, pode desligar “Confirm email”
 4. **Settings → API**: copie **Project URL** e **anon public** key
 5. No GitHub do repo → **Settings → Secrets and variables → Actions**, crie:

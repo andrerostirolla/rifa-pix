@@ -6,6 +6,7 @@ import { NumberGrid } from './NumberGrid'
 import { isSupabaseConfigured, supabase } from './lib/supabase'
 import { loadCloudSession, saveCloudSession } from './lib/workspace'
 import { brl, formatNumbers, useStore } from './store'
+import { TeamChat } from './TeamChat'
 import { previewTxidMatches } from './txidMatch'
 import type { CashDestination, PaymentMethod, PaymentStatus, PixDestination } from './types'
 
@@ -1641,6 +1642,7 @@ export default function LocalApp() {
       )}
 
       {toast && <div className="toast">{toast}</div>}
+      <TeamChat />
     </div>
   )
 }

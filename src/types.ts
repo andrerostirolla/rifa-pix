@@ -1,7 +1,10 @@
 export type PaymentStatus = 'pendente' | 'parcial' | 'quitado' | 'divergente'
 export type PaymentMethod = 'pix' | 'dinheiro'
 export type PixDestination = 'entidade' | 'vendedor'
+/** Destino do dinheiro físico: com o vendedor ou já na loja/entidade */
+export type CashDestination = 'vendedor' | 'loja'
 export type SessionRole = 'admin' | 'member'
+export type BlockTransferKind = 'assign' | 'transfer' | 'unassign'
 
 export interface Raffle {
   id: string
@@ -65,10 +68,26 @@ export interface Sale {
   status: PaymentStatus
   paymentMethod: PaymentMethod
   pixDestination?: PixDestination
+  /** Só para dinheiro: ficou com o vendedor ou já foi pra loja */
+  cashDestination?: CashDestination
   notes?: string
   createdAt: string
   /** Bloco de origem da venda, quando aplicável */
   blockId?: string
+  /** Comprovante (imagem ou PDF em data URL) */
+  proofImageDataUrl?: string
+}
+
+/** Rastro de atribuição / transferência / liberação de bloco */
+export interface BlockTransfer {
+  id: string
+  blockId: string
+  raffleId: string
+  fromMemberId?: string
+  toMemberId?: string
+  kind: BlockTransferKind
+  createdAt: string
+  note?: string
 }
 
 export interface PixPayment {
@@ -125,4 +144,5 @@ export interface AppState {
   amortizations: AmortizationEntry[]
   pixCharges: PixCharge[]
   memberSettlements: MemberSettlement[]
+  blockTransfers: BlockTransfer[]
 }

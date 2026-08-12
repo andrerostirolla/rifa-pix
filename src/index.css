@@ -587,10 +587,87 @@ th {
 .transfer-block.sold-out {
   background: rgba(180, 35, 24, 0.12);
   color: #8f1d14;
+  opacity: 0.85;
+  cursor: not-allowed;
+}
+
+.transfer-block.free {
+  background: rgba(15, 122, 95, 0.14);
+  color: #0a5241;
+}
+
+.transfer-block.assigned {
+  background: rgba(90, 100, 96, 0.18);
+  color: #6b736f;
+  cursor: not-allowed;
+  opacity: 0.75;
 }
 
 .transfer-block.selected {
   outline: 2px solid var(--ink);
+}
+
+.transfer-block:disabled {
+  cursor: not-allowed;
+}
+
+.owner-assigned {
+  color: var(--danger);
+  font-weight: 800;
+}
+
+.owner-free {
+  color: var(--ok);
+  font-weight: 800;
+}
+
+.reports-stack {
+  display: grid;
+  gap: 1rem;
+}
+
+.report-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin: 0.35rem 0 0.85rem;
+}
+
+.report-tabs button {
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.7);
+  border-radius: 999px;
+  padding: 0.45rem 0.85rem;
+  font-weight: 700;
+  color: var(--ink-soft);
+}
+
+.report-tabs button.active {
+  background: var(--ink);
+  color: #f5faf7;
+  border-color: var(--ink);
+}
+
+.report-metrics {
+  margin-top: 0.35rem;
+}
+
+.btn-proof {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: rgba(15, 122, 95, 0.1);
+  color: var(--accent-deep);
+  padding: 0;
+  vertical-align: middle;
+}
+
+.btn-proof:hover {
+  background: rgba(15, 122, 95, 0.2);
 }
 
 .field-label {

@@ -5,16 +5,59 @@ import { parsePixCsv, SAMPLE_CSV } from './csvImport'
 import { NumberGrid } from './NumberGrid'
 import { brl, formatNumbers, useStore } from './store'
 import { previewTxidMatches } from './txidMatch'
-import type { PaymentMethod, PaymentStatus, PixDestination } from './types'
+import type { CashDestination, PaymentMethod, PaymentStatus, PixDestination } from './types'
 
-type AdminTab = 'painel' | 'equipe' | 'eventos' | 'vendas' | 'pix' | 'txid' | 'amortizacao' | 'relatorios'
+type AdminTab = 'painel' | 'equipe' | 'transferencias' | 'eventos' | 'vendas' | 'pix' | 'txid' | 'amortizacao' | 'relatorios'
 type MemberTab = 'blocos' | 'vendas'
+type ReportSection = 'prestacao' | 'vendas' | 'transferencias'
 
 const statusLabel: Record<PaymentStatus, string> = {
   pendente: 'Pendente',
   parcial: 'Parcial',
   quitado: 'Quitado',
   divergente: 'Divergente',
+}
+
+function openProof(dataUrl: string) {
+  try {
+    const [header, b64] = dataUrl.split(',')
+    if (!b64) {
+      window.open(dataUrl, '_blank', 'noopener,noreferrer')
+      return
+    }
+    const mime = header.match(/data:([^;]+)/)?.[1] || 'application/octet-stream'
+    const bin = atob(b64)
+    const bytes = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i)
+    const url = URL.createObjectURL(new Blob([bytes], { type: mime }))
+    window.open(url, '_blank', 'noopener,noreferrer')
+  } catch {
+    window.open(dataUrl, '_blank', 'noopener,noreferrer')
+  }
+}
+
+async function fileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(new Error('Falha ao ler arquivo'))
+    reader.readAsDataURL(file)
+  })
+}
+
+function ProofIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6Z"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinejoin="round"
+      />
+      <path d="M14 2v6h6" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+      <path d="M8 13h8M8 17h5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  )
 }
 
 export default function LocalApp() {
@@ -28,11 +71,16 @@ export default function LocalApp() {
   const [selectedNumbers, setSelectedNumbers] = useState<number[]>([])
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('dinheiro')
   const [pixDestination, setPixDestination] = useState<PixDestination>('entidade')
+  const [cashDestination, setCashDestination] = useState<CashDestination>('vendedor')
   const [saleRaffleId, setSaleRaffleId] = useState('')
   const [openBlockId, setOpenBlockId] = useState<string | null>(null)
   const [openEventId, setOpenEventId] = useState<string | null>(null)
   const [filterEventId, setFilterEventId] = useState('')
+  const [assignBlockId, setAssignBlockId] = useState('')
   const [transferBlockId, setTransferBlockId] = useState('')
+  const [transferEventId, setTransferEventId] = useState('')
+  const [proofDataUrl, setProofDataUrl] = useState('')
+  const [reportSection, setReportSection] = useState<ReportSection>('prestacao')
   const [csvText, setCsvText] = useState('')
   const [importPreview, setImportPreview] = useState<ReturnType<typeof parsePixCsv> | null>(null)
 
@@ -44,11 +92,13 @@ export default function LocalApp() {
   const amortizations = useStore((s) => s.amortizations)
   const pixCharges = useStore((s) => s.pixCharges)
   const memberSettlements = useStore((s) => s.memberSettlements)
+  const blockTransfers = useStore((s) => s.blockTransfers)
   const addRaffle = useStore((s) => s.addRaffle)
   const removeRaffle = useStore((s) => s.removeRaffle)
   const addMember = useStore((s) => s.addMember)
   const removeMember = useStore((s) => s.removeMember)
   const assignBlock = useStore((s) => s.assignBlock)
+  const transferBlock = useStore((s) => s.transferBlock)
   const unassignBlock = useStore((s) => s.unassignBlock)
   const memberNumbers = useStore((s) => s.memberNumbers)
   const soldNumbers = useStore((s) => s.soldNumbers)
@@ -104,7 +154,13 @@ export default function LocalApp() {
       const soldCount = mSales.reduce((acc, s) => acc + s.numbers.length, 0)
       const expected = mSales.reduce((acc, s) => acc + s.totalAmount, 0)
       const received = mSales.reduce((acc, s) => acc + s.paidAmount, 0)
-      const cash = mSales.filter((s) => s.paymentMethod === 'dinheiro').reduce((acc, s) => acc + s.paidAmount, 0)
+      const cashVendedor = mSales
+        .filter((s) => s.paymentMethod === 'dinheiro' && (s.cashDestination || 'vendedor') === 'vendedor')
+        .reduce((acc, s) => acc + s.paidAmount, 0)
+      const cashLoja = mSales
+        .filter((s) => s.paymentMethod === 'dinheiro' && s.cashDestination === 'loja')
+        .reduce((acc, s) => acc + s.paidAmount, 0)
+      const cash = cashVendedor + cashLoja
       const pixEntidade = mSales
         .filter((s) => s.paymentMethod === 'pix' && s.pixDestination === 'entidade')
         .reduce((acc, s) => acc + s.paidAmount, 0)
@@ -121,13 +177,29 @@ export default function LocalApp() {
         expected,
         received,
         cash,
+        cashVendedor,
+        cashLoja,
         pixEntidade,
         pixVendedor,
-        cashOpen: Math.max(0, cash - settledCash),
+        cashOpen: Math.max(0, cashVendedor - settledCash),
         pixVendedorOpen: Math.max(0, pixVendedor - settledPix),
       }
     })
   }, [members, sales, memberSettlements])
+
+  const totals = useMemo(() => {
+    const expected = sales.reduce((a, s) => a + s.totalAmount, 0)
+    const received = sales.reduce((a, s) => a + s.paidAmount, 0)
+    const cashLoja = sales
+      .filter((s) => s.paymentMethod === 'dinheiro' && s.cashDestination === 'loja')
+      .reduce((a, s) => a + s.paidAmount, 0)
+    const cashVendedorOpen = reports.reduce((a, r) => a + r.cashOpen, 0)
+    const pixEntidade = sales
+      .filter((s) => s.paymentMethod === 'pix' && s.pixDestination === 'entidade')
+      .reduce((a, s) => a + s.paidAmount, 0)
+    const pixVendedorOpen = reports.reduce((a, r) => a + r.pixVendedorOpen, 0)
+    return { expected, received, cashLoja, cashVendedorOpen, pixEntidade, pixVendedorOpen }
+  }, [sales, reports])
 
   const who = isAdmin ? getAuthRecord()?.organizerName || 'ADM' : session?.memberName || 'Membro'
 
@@ -135,12 +207,21 @@ export default function LocalApp() {
     setSelectedNumbers((prev) => (prev.includes(n) ? prev.filter((x) => x !== n) : [...prev, n].sort((a, b) => a - b)))
   }
 
-  const onCreateSale = (e: FormEvent<HTMLFormElement>) => {
+  const onCreateSale = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault()
     if (!memberId && !isAdmin) return
     const fd = new FormData(e.currentTarget)
     const sellerId = isAdmin ? String(fd.get('memberId') || '') : memberId
     const raffleId = String(fd.get('raffleId') || currentRaffleId)
+    let proof = proofDataUrl
+    const file = (e.currentTarget.elements.namedItem('proofFile') as HTMLInputElement | null)?.files?.[0]
+    if (file) {
+      try {
+        proof = await fileToDataUrl(file)
+      } catch {
+        return showToast('Não foi possível ler o comprovante.')
+      }
+    }
     const result = addSale({
       raffleId,
       memberId: sellerId,
@@ -149,8 +230,10 @@ export default function LocalApp() {
       numbers: selectedNumbers,
       paymentMethod,
       pixDestination: paymentMethod === 'pix' ? pixDestination : undefined,
+      cashDestination: paymentMethod === 'dinheiro' ? cashDestination : undefined,
       notes: String(fd.get('notes') || ''),
       proofTxid: String(fd.get('proofTxid') || ''),
+      proofImageDataUrl: proof || undefined,
       receivedNow: paymentMethod === 'dinheiro' || String(fd.get('receivedNow') || '') === 'sim',
       blockId: openBlockId || undefined,
     })
@@ -158,6 +241,8 @@ export default function LocalApp() {
     e.currentTarget.reset()
     setSelectedNumbers([])
     setPaymentMethod('dinheiro')
+    setCashDestination('vendedor')
+    setProofDataUrl('')
     showToast('Venda registrada.')
   }
 
@@ -190,6 +275,7 @@ export default function LocalApp() {
                   [
                     ['painel', 'Painel'],
                     ['equipe', 'Equipe'],
+                    ['transferencias', 'Transferências'],
                     ['eventos', 'Eventos'],
                     ['vendas', 'Vendas'],
                     ['pix', 'PIX/CSV'],
@@ -332,6 +418,19 @@ export default function LocalApp() {
                       <option value="pix">PIX</option>
                     </select>
                   </label>
+                  {paymentMethod === 'dinheiro' && (
+                    <label className="full">
+                      Destino do dinheiro
+                      <select
+                        value={cashDestination}
+                        onChange={(e) => setCashDestination(e.target.value as CashDestination)}
+                        required
+                      >
+                        <option value="vendedor">Ficou comigo (vendedor)</option>
+                        <option value="loja">Já foi pra loja / entidade</option>
+                      </select>
+                    </label>
+                  )}
                   {paymentMethod === 'pix' && (
                     <label className="full">
                       PIX caiu em qual conta?
@@ -353,6 +452,27 @@ export default function LocalApp() {
                   <label className="full">
                     TXID / End-to-end (opcional)
                     <input name="proofTxid" placeholder="Do comprovante, se tiver" />
+                  </label>
+                  <label className="full">
+                    Comprovante (imagem ou PDF, opcional)
+                    <input
+                      name="proofFile"
+                      type="file"
+                      accept="image/*,application/pdf"
+                      onChange={async (ev) => {
+                        const file = ev.target.files?.[0]
+                        if (!file) {
+                          setProofDataUrl('')
+                          return
+                        }
+                        try {
+                          setProofDataUrl(await fileToDataUrl(file))
+                        } catch {
+                          setProofDataUrl('')
+                          showToast('Não foi possível ler o comprovante.')
+                        }
+                      }}
+                    />
                   </label>
                   <label className="full">
                     Observações (opcional)
@@ -391,7 +511,28 @@ export default function LocalApp() {
                       <td>{s.buyerName}</td>
                       <td>{formatNumbers(s.numbers)}</td>
                       <td>
-                        {s.paymentMethod === 'dinheiro' ? 'Dinheiro' : `PIX (${s.pixDestination === 'entidade' ? 'entidade' : 'vendedor'})`}
+                        {s.paymentMethod === 'dinheiro'
+                          ? `Dinheiro (${s.cashDestination === 'loja' ? 'loja' : 'vendedor'})`
+                          : `PIX (${s.pixDestination === 'entidade' ? 'entidade' : 'vendedor'})`}
+                        {(s.proofImageDataUrl || pixCharges.find((c) => c.saleId === s.id)?.proofImageDataUrl) && (
+                          <>
+                            {' · '}
+                            <button
+                              type="button"
+                              className="btn-proof"
+                              title="Abrir comprovante"
+                              onClick={() =>
+                                openProof(
+                                  s.proofImageDataUrl ||
+                                    pixCharges.find((c) => c.saleId === s.id)?.proofImageDataUrl ||
+                                    '',
+                                )
+                              }
+                            >
+                              <ProofIcon />
+                            </button>
+                          </>
+                        )}
                         <div className="hint">
                           {brl(s.paidAmount)} / {brl(s.totalAmount)}
                         </div>
@@ -528,22 +669,18 @@ export default function LocalApp() {
             onSubmit={(e) => {
               e.preventDefault()
               const fd = new FormData(e.currentTarget)
-              const blockId = transferBlockId || String(fd.get('blockId') || '')
-              const st = blockStats(blockId)
-              if (st.open <= 0) {
-                return showToast('Esse bloco não pode ser transferido: está vendido (sem números abertos).')
-              }
+              const blockId = assignBlockId || String(fd.get('blockId') || '')
               const result = assignBlock(blockId, String(fd.get('memberId') || ''))
               if (!result.ok) return showToast(result.error || 'Erro')
-              setTransferBlockId('')
+              setAssignBlockId('')
               e.currentTarget.reset()
-              showToast('Bloco atribuído/transferido.')
+              showToast('Bloco atribuído ao membro.')
             }}
           >
             <div className="panel-head">
               <div>
-                <h2>Atribuir / transferir bloco</h2>
-                <p>Azul = ainda tem números. Vermelho = vendido (não transfere).</p>
+                <h2>Atribuir bloco livre</h2>
+                <p>Verde = livre. Cinza = já atribuído (indisponível aqui). Transferências entre membros ficam na aba Transferências.</p>
               </div>
             </div>
             <div className="form-grid">
@@ -553,7 +690,7 @@ export default function LocalApp() {
                   value={filterEventId || raffles[0]?.id || ''}
                   onChange={(e) => {
                     setFilterEventId(e.target.value)
-                    setTransferBlockId('')
+                    setAssignBlockId('')
                   }}
                 >
                   {raffles.map((r) => (
@@ -571,32 +708,30 @@ export default function LocalApp() {
                     .sort((a, b) => a.index - b.index)
                     .map((b) => {
                       const st = blockStats(b.id)
-                      const soldOut = st.open <= 0
+                      const assigned = Boolean(b.memberId)
                       const owner = members.find((m) => m.id === b.memberId)?.name || 'livre'
                       return (
                         <button
                           key={b.id}
                           type="button"
-                          className={`transfer-block ${soldOut ? 'sold-out' : 'has-open'} ${transferBlockId === b.id ? 'selected' : ''}`}
+                          className={`transfer-block ${assigned ? 'assigned' : 'free'} ${assignBlockId === b.id ? 'selected' : ''}`}
+                          disabled={assigned}
                           onClick={() => {
-                            if (soldOut) {
-                              showToast('Esse bloco não pode ser transferido: está vendido (sem números abertos).')
-                              return
-                            }
-                            setTransferBlockId(b.id)
+                            if (assigned) return
+                            setAssignBlockId(b.id)
                           }}
                         >
                           <strong>{b.label}</strong>
                           <span>
                             {b.fromNumber}–{b.toNumber} · {owner}
                           </span>
-                          <span>{soldOut ? 'Vendido' : `${st.open} abertos`}</span>
+                          <span>{assigned ? 'Indisponível' : `${st.open} abertos`}</span>
                         </button>
                       )
                     })}
                 </div>
-                <input type="hidden" name="blockId" value={transferBlockId} required={!transferBlockId ? undefined : undefined} />
-                {!transferBlockId && <p className="hint">Selecione um bloco azul acima.</p>}
+                <input type="hidden" name="blockId" value={assignBlockId} />
+                {!assignBlockId && <p className="hint">Selecione um bloco livre (verde) acima.</p>}
               </div>
               <label className="full">
                 Para o membro
@@ -613,8 +748,8 @@ export default function LocalApp() {
               </label>
             </div>
             <div className="btn-row">
-              <button className="btn btn-primary" type="submit" disabled={!transferBlockId}>
-                Transferir / atribuir
+              <button className="btn btn-primary" type="submit" disabled={!assignBlockId}>
+                Atribuir bloco
               </button>
             </div>
           </form>
@@ -679,6 +814,148 @@ export default function LocalApp() {
                   </article>
                 )
               })}
+            </div>
+          </div>
+        </section>
+      )}
+
+      {isAdmin && adminTab === 'transferencias' && (
+        <section className="grid-2">
+          <form
+            className="panel"
+            onSubmit={(e) => {
+              e.preventDefault()
+              const fd = new FormData(e.currentTarget)
+              const blockId = transferBlockId || String(fd.get('blockId') || '')
+              const result = transferBlock(blockId, String(fd.get('memberId') || ''))
+              if (!result.ok) return showToast(result.error || 'Erro')
+              setTransferBlockId('')
+              e.currentTarget.reset()
+              showToast('Transferência registrada.')
+            }}
+          >
+            <div className="panel-head">
+              <div>
+                <h2>Transferir bloco entre membros</h2>
+                <p>Azul = tem números abertos. Vermelho = vendido (não transfere). Cada movimentação fica no relatório.</p>
+              </div>
+            </div>
+            <div className="form-grid">
+              <label className="full">
+                Evento
+                <select
+                  value={transferEventId || filterEventId || raffles[0]?.id || ''}
+                  onChange={(e) => {
+                    setTransferEventId(e.target.value)
+                    setTransferBlockId('')
+                  }}
+                >
+                  {raffles.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.eventName}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="full">
+                <span className="field-label">Blocos já atribuídos</span>
+                <div className="transfer-block-list">
+                  {blocks
+                    .filter((b) => b.raffleId === (transferEventId || filterEventId || raffles[0]?.id) && b.memberId)
+                    .sort((a, b) => a.index - b.index)
+                    .map((b) => {
+                      const st = blockStats(b.id)
+                      const soldOut = st.open <= 0
+                      const owner = members.find((m) => m.id === b.memberId)?.name || '—'
+                      return (
+                        <button
+                          key={b.id}
+                          type="button"
+                          className={`transfer-block ${soldOut ? 'sold-out' : 'has-open'} ${transferBlockId === b.id ? 'selected' : ''}`}
+                          disabled={soldOut}
+                          onClick={() => {
+                            if (soldOut) {
+                              showToast('Esse bloco não pode ser transferido: está vendido (sem números abertos).')
+                              return
+                            }
+                            setTransferBlockId(b.id)
+                          }}
+                        >
+                          <strong>{b.label}</strong>
+                          <span className="owner-assigned">
+                            {b.fromNumber}–{b.toNumber} · {owner}
+                          </span>
+                          <span>{soldOut ? 'Vendido' : `${st.open} abertos`}</span>
+                        </button>
+                      )
+                    })}
+                </div>
+                <input type="hidden" name="blockId" value={transferBlockId} />
+                {!transferBlockId && <p className="hint">Selecione um bloco azul acima.</p>}
+              </div>
+              <label className="full">
+                Novo membro
+                <select name="memberId" required defaultValue="">
+                  <option value="" disabled>
+                    Selecione
+                  </option>
+                  {members.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <div className="btn-row">
+              <button className="btn btn-primary" type="submit" disabled={!transferBlockId}>
+                Transferir bloco
+              </button>
+            </div>
+          </form>
+
+          <div className="panel">
+            <div className="panel-head">
+              <div>
+                <h2>Últimas movimentações</h2>
+                <p>Rastro de atribuições, transferências e liberações.</p>
+              </div>
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Quando</th>
+                    <th>Tipo</th>
+                    <th>Bloco</th>
+                    <th>De</th>
+                    <th>Para</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {blockTransfers.slice(0, 40).map((t) => {
+                    const block = blocks.find((b) => b.id === t.blockId)
+                    const kindLabel =
+                      t.kind === 'assign' ? 'Atribuição' : t.kind === 'transfer' ? 'Transferência' : 'Liberação'
+                    return (
+                      <tr key={t.id}>
+                        <td>{new Date(t.createdAt).toLocaleString('pt-BR')}</td>
+                        <td>{kindLabel}</td>
+                        <td>{block?.label || '—'}</td>
+                        <td>{t.fromMemberId ? members.find((m) => m.id === t.fromMemberId)?.name || '—' : 'livre'}</td>
+                        <td>{t.toMemberId ? members.find((m) => m.id === t.toMemberId)?.name || '—' : 'livre'}</td>
+                      </tr>
+                    )
+                  })}
+                  {blockTransfers.length === 0 && (
+                    <tr>
+                      <td colSpan={5}>
+                        <p className="empty">Nenhuma movimentação ainda.</p>
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
             </div>
           </div>
         </section>
@@ -825,7 +1102,7 @@ export default function LocalApp() {
                     {eventBlocks.map((b) => {
                       const st = blockStats(b.id)
                       const soldOut = st.open <= 0
-                      const owner = members.find((m) => m.id === b.memberId)?.name || 'livre'
+                      const owner = members.find((m) => m.id === b.memberId)?.name
                       return (
                         <div key={b.id} className={`block-card ${soldOut ? 'sold-out' : 'has-open'}`}>
                           <strong>{b.label}</strong>
@@ -833,7 +1110,7 @@ export default function LocalApp() {
                             nº {b.fromNumber}–{b.toNumber}
                           </span>
                           <span className="block-open">{soldOut ? 'Vendido' : `${st.open} abertos`}</span>
-                          <span className="hint">{owner}</span>
+                          <span className={owner ? 'owner-assigned' : 'owner-free'}>{owner || 'livre'}</span>
                         </div>
                       )
                     })}
@@ -870,7 +1147,9 @@ export default function LocalApp() {
                     <td>{s.buyerName}</td>
                     <td>{formatNumbers(s.numbers)}</td>
                     <td>
-                      {s.paymentMethod === 'dinheiro' ? 'Dinheiro' : `PIX/${s.pixDestination || '—'}`}
+                      {s.paymentMethod === 'dinheiro'
+                        ? `Dinheiro (${s.cashDestination === 'loja' ? 'loja' : 'vendedor'})`
+                        : `PIX/${s.pixDestination || '—'}`}
                       <div className="hint">
                         {brl(s.paidAmount)}/{brl(s.totalAmount)}
                       </div>
@@ -879,6 +1158,22 @@ export default function LocalApp() {
                       <span className={`badge ${s.status}`}>{statusLabel[s.status]}</span>
                     </td>
                     <td>
+                      {(s.proofImageDataUrl || pixCharges.find((c) => c.saleId === s.id)?.proofImageDataUrl) && (
+                        <button
+                          type="button"
+                          className="btn-proof"
+                          title="Abrir comprovante"
+                          onClick={() =>
+                            openProof(
+                              s.proofImageDataUrl ||
+                                pixCharges.find((c) => c.saleId === s.id)?.proofImageDataUrl ||
+                                '',
+                            )
+                          }
+                        >
+                          <ProofIcon />
+                        </button>
+                      )}
                       <button type="button" className="btn btn-ghost" onClick={() => removeSale(s.id)}>
                         Excluir
                       </button>
@@ -1003,80 +1298,271 @@ export default function LocalApp() {
       )}
 
       {isAdmin && adminTab === 'relatorios' && (
-        <section className="panel">
-          <div className="panel-head">
-            <div>
-              <h2>Relatórios / blocos / prestação</h2>
-              <p>Quem tem mais blocos em aberto, quem esgotou, e valores a prestar.</p>
+        <section className="reports-stack">
+          <div className="panel">
+            <div className="panel-head">
+              <div>
+                <h2>Relatórios analíticos</h2>
+                <p>Visão financeira, vendas com comprovante e rastro de transferências.</p>
+              </div>
+            </div>
+            <div className="report-tabs">
+              {(
+                [
+                  ['prestacao', 'Prestação / blocos'],
+                  ['vendas', 'Vendas detalhadas'],
+                  ['transferencias', 'Transferências entre membros'],
+                ] as const
+              ).map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  className={reportSection === id ? 'active' : ''}
+                  onClick={() => setReportSection(id)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="hero-metrics report-metrics">
+              <article className="metric">
+                <span>Esperado</span>
+                <strong>{brl(totals.expected)}</strong>
+              </article>
+              <article className="metric">
+                <span>Recebido</span>
+                <strong>{brl(totals.received)}</strong>
+              </article>
+              <article className="metric">
+                <span>Dinheiro loja</span>
+                <strong>{brl(totals.cashLoja)}</strong>
+              </article>
+              <article className="metric">
+                <span>Dinheiro c/ vendedor</span>
+                <strong>{brl(totals.cashVendedorOpen)}</strong>
+              </article>
+              <article className="metric">
+                <span>PIX entidade</span>
+                <strong>{brl(totals.pixEntidade)}</strong>
+              </article>
+              <article className="metric">
+                <span>PIX vendedor aberto</span>
+                <strong>{brl(totals.pixVendedorOpen)}</strong>
+              </article>
             </div>
           </div>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Membro</th>
-                  <th>Blocos</th>
-                  <th>Com aberto</th>
-                  <th>Esgotados</th>
-                  <th>Nº abertos</th>
-                  <th>Nº vendidos</th>
-                  <th>Dinheiro c/ ele</th>
-                  <th>PIX vendedor aberto</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {[...reports]
-                  .sort((a, b) => memberBlockStats(b.member.id).openNumbers - memberBlockStats(a.member.id).openNumbers)
-                  .map((r) => {
-                    const bs = memberBlockStats(r.member.id)
-                    return (
-                      <tr key={r.member.id}>
-                        <td>{r.member.name}</td>
-                        <td>{bs.blocks}</td>
-                        <td>{bs.openBlocks}</td>
-                        <td>{bs.soldOutBlocks}</td>
-                        <td>{bs.openNumbers}</td>
-                        <td>{bs.soldNumbers}</td>
-                        <td>{brl(r.cashOpen)}</td>
-                        <td>{brl(r.pixVendedorOpen)}</td>
-                        <td>
-                          {r.cashOpen > 0 && (
-                            <button
-                              type="button"
-                              className="btn btn-secondary"
-                              onClick={() => {
-                                addMemberSettlement({ memberId: r.member.id, amount: r.cashOpen, kind: 'dinheiro', note: 'Prestação dinheiro' })
-                                showToast('Dinheiro quitado com a entidade.')
-                              }}
-                            >
-                              Receber dinheiro
-                            </button>
-                          )}
-                          {r.pixVendedorOpen > 0 && (
-                            <button
-                              type="button"
-                              className="btn btn-secondary"
-                              onClick={() => {
-                                addMemberSettlement({
-                                  memberId: r.member.id,
-                                  amount: r.pixVendedorOpen,
-                                  kind: 'pix_vendedor',
-                                  note: 'Repasse PIX vendedor',
-                                })
-                                showToast('PIX do vendedor prestado.')
-                              }}
-                            >
-                              Receber PIX vendedor
-                            </button>
-                          )}
+
+          {reportSection === 'prestacao' && (
+            <div className="panel">
+              <div className="panel-head">
+                <div>
+                  <h2>Prestação por membro</h2>
+                  <p>Blocos em aberto, dinheiro com o vendedor e PIX a repassar.</p>
+                </div>
+              </div>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Membro</th>
+                      <th>Blocos</th>
+                      <th>Com aberto</th>
+                      <th>Esgotados</th>
+                      <th>Nº abertos</th>
+                      <th>Nº vendidos</th>
+                      <th>Dinheiro loja</th>
+                      <th>Dinheiro c/ ele</th>
+                      <th>PIX vendedor aberto</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {[...reports]
+                      .sort((a, b) => memberBlockStats(b.member.id).openNumbers - memberBlockStats(a.member.id).openNumbers)
+                      .map((r) => {
+                        const bs = memberBlockStats(r.member.id)
+                        return (
+                          <tr key={r.member.id}>
+                            <td>{r.member.name}</td>
+                            <td>{bs.blocks}</td>
+                            <td>{bs.openBlocks}</td>
+                            <td>{bs.soldOutBlocks}</td>
+                            <td>{bs.openNumbers}</td>
+                            <td>{bs.soldNumbers}</td>
+                            <td>{brl(r.cashLoja)}</td>
+                            <td>{brl(r.cashOpen)}</td>
+                            <td>{brl(r.pixVendedorOpen)}</td>
+                            <td>
+                              {r.cashOpen > 0 && (
+                                <button
+                                  type="button"
+                                  className="btn btn-secondary"
+                                  onClick={() => {
+                                    addMemberSettlement({
+                                      memberId: r.member.id,
+                                      amount: r.cashOpen,
+                                      kind: 'dinheiro',
+                                      note: 'Prestação dinheiro',
+                                    })
+                                    showToast('Dinheiro quitado com a entidade.')
+                                  }}
+                                >
+                                  Receber dinheiro
+                                </button>
+                              )}
+                              {r.pixVendedorOpen > 0 && (
+                                <button
+                                  type="button"
+                                  className="btn btn-secondary"
+                                  onClick={() => {
+                                    addMemberSettlement({
+                                      memberId: r.member.id,
+                                      amount: r.pixVendedorOpen,
+                                      kind: 'pix_vendedor',
+                                      note: 'Repasse PIX vendedor',
+                                    })
+                                    showToast('PIX do vendedor prestado.')
+                                  }}
+                                >
+                                  Receber PIX vendedor
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        )
+                      })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {reportSection === 'vendas' && (
+            <div className="panel">
+              <div className="panel-head">
+                <div>
+                  <h2>Vendas detalhadas</h2>
+                  <p>Recebimento, destino do dinheiro e comprovante anexado.</p>
+                </div>
+              </div>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Data</th>
+                      <th>Membro</th>
+                      <th>Comprador</th>
+                      <th>Números</th>
+                      <th>Valor</th>
+                      <th>Forma</th>
+                      <th>Dinheiro loja</th>
+                      <th>Status</th>
+                      <th>Comprovante</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {[...sales]
+                      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+                      .map((s) => {
+                        const proof =
+                          s.proofImageDataUrl || pixCharges.find((c) => c.saleId === s.id)?.proofImageDataUrl
+                        const loja =
+                          s.paymentMethod === 'dinheiro' && s.cashDestination === 'loja' ? s.paidAmount : 0
+                        return (
+                          <tr key={s.id}>
+                            <td>{new Date(s.createdAt).toLocaleString('pt-BR')}</td>
+                            <td>{members.find((m) => m.id === s.memberId)?.name || '—'}</td>
+                            <td>{s.buyerName}</td>
+                            <td>{formatNumbers(s.numbers)}</td>
+                            <td>
+                              {brl(s.paidAmount)}/{brl(s.totalAmount)}
+                            </td>
+                            <td>
+                              {s.paymentMethod === 'dinheiro'
+                                ? `Dinheiro (${s.cashDestination === 'loja' ? 'loja' : 'vendedor'})`
+                                : `PIX/${s.pixDestination || '—'}`}
+                            </td>
+                            <td>{brl(loja)}</td>
+                            <td>
+                              <span className={`badge ${s.status}`}>{statusLabel[s.status]}</span>
+                            </td>
+                            <td>
+                              {proof ? (
+                                <button
+                                  type="button"
+                                  className="btn-proof"
+                                  title="Abrir comprovante"
+                                  onClick={() => openProof(proof)}
+                                >
+                                  <ProofIcon />
+                                </button>
+                              ) : (
+                                '—'
+                              )}
+                            </td>
+                          </tr>
+                        )
+                      })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {reportSection === 'transferencias' && (
+            <div className="panel">
+              <div className="panel-head">
+                <div>
+                  <h2>Transferências entre membros</h2>
+                  <p>Histórico completo de atribuições, transferências e liberações de blocos.</p>
+                </div>
+              </div>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Quando</th>
+                      <th>Tipo</th>
+                      <th>Evento</th>
+                      <th>Bloco</th>
+                      <th>De</th>
+                      <th>Para</th>
+                      <th>Obs.</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {blockTransfers.map((t) => {
+                      const block = blocks.find((b) => b.id === t.blockId)
+                      const raffle = raffles.find((r) => r.id === t.raffleId)
+                      const kindLabel =
+                        t.kind === 'assign' ? 'Atribuição' : t.kind === 'transfer' ? 'Transferência' : 'Liberação'
+                      return (
+                        <tr key={t.id}>
+                          <td>{new Date(t.createdAt).toLocaleString('pt-BR')}</td>
+                          <td>{kindLabel}</td>
+                          <td>{raffle?.eventName || '—'}</td>
+                          <td>
+                            {block?.label || '—'}
+                            {block ? ` (${block.fromNumber}–${block.toNumber})` : ''}
+                          </td>
+                          <td>{t.fromMemberId ? members.find((m) => m.id === t.fromMemberId)?.name || '—' : 'livre'}</td>
+                          <td>{t.toMemberId ? members.find((m) => m.id === t.toMemberId)?.name || '—' : 'livre'}</td>
+                          <td>{t.note || '—'}</td>
+                        </tr>
+                      )
+                    })}
+                    {blockTransfers.length === 0 && (
+                      <tr>
+                        <td colSpan={7}>
+                          <p className="empty">Nenhuma transferência registrada.</p>
                         </td>
                       </tr>
-                    )
-                  })}
-              </tbody>
-            </table>
-          </div>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </section>
       )}
 

@@ -6,6 +6,8 @@ import type {
   AmortizationEntry,
   AppState,
   Block,
+  BlockTransfer,
+  CashDestination,
   Member,
   MemberSettlement,
   NumberRange,
@@ -48,7 +50,9 @@ type Store = AppState & {
   addMember: (input: { name: string; phone?: string; pin: string }) => { ok: true; member: Member } | { ok: false; error: string }
   updateMember: (id: string, patch: Partial<Pick<Member, 'name' | 'phone' | 'pin' | 'active'>>) => void
   removeMember: (id: string) => void
+  /** Atribui bloco livre a um membro (não transfere entre membros). */
   assignBlock: (blockId: string, memberId: string) => { ok: boolean; error?: string }
+  /** Transfere bloco de um membro para outro (com rastro). */
   transferBlock: (blockId: string, toMemberId: string) => { ok: boolean; error?: string }
   unassignBlock: (blockId: string) => void
   assignRange: (input: { memberId: string; raffleId: string; fromNumber: number; toNumber: number }) => {
@@ -75,6 +79,7 @@ type Store = AppState & {
     numbers: number[]
     paymentMethod: 'pix' | 'dinheiro'
     pixDestination?: PixDestination
+    cashDestination?: CashDestination
     notes?: string
     proofTxid?: string
     proofImageDataUrl?: string
@@ -140,6 +145,26 @@ const empty: AppState = {
   amortizations: [],
   pixCharges: [],
   memberSettlements: [],
+  blockTransfers: [],
+}
+
+function pushTransfer(
+  list: BlockTransfer[],
+  input: Omit<BlockTransfer, 'id' | 'createdAt'> & { createdAt?: string },
+): BlockTransfer[] {
+  return [
+    {
+      id: uid(),
+      createdAt: input.createdAt || new Date().toISOString(),
+      blockId: input.blockId,
+      raffleId: input.raffleId,
+      fromMemberId: input.fromMemberId,
+      toMemberId: input.toMemberId,
+      kind: input.kind,
+      note: input.note,
+    },
+    ...list,
+  ]
 }
 
 export const useStore = create<Store>()(
@@ -197,6 +222,7 @@ export const useStore = create<Store>()(
           sales: s.sales.filter((sale) => sale.raffleId !== id),
           numberRanges: s.numberRanges.filter((r) => r.raffleId !== id),
           blocks: s.blocks.filter((b) => b.raffleId !== id),
+          blockTransfers: s.blockTransfers.filter((t) => t.raffleId !== id),
           pixCharges: s.pixCharges.filter((c) => !s.sales.some((sale) => sale.id === c.saleId && sale.raffleId === id)),
         })),
 
@@ -236,23 +262,74 @@ export const useStore = create<Store>()(
       assignBlock: (blockId, memberId) => {
         const block = get().blocks.find((b) => b.id === blockId)
         if (!block) return { ok: false, error: 'Bloco não encontrado.' }
+        if (block.memberId) {
+          return { ok: false, error: 'Bloco já atribuído. Use a aba Transferências para mover entre membros.' }
+        }
         if (!get().members.some((m) => m.id === memberId && m.active)) return { ok: false, error: 'Membro inválido.' }
         const st = get().blockStats(blockId)
         if (st.open <= 0) {
-          return { ok: false, error: 'Esse bloco não pode ser transferido: está vendido (sem números abertos).' }
+          return { ok: false, error: 'Esse bloco não pode ser atribuído: está vendido (sem números abertos).' }
         }
         set((s) => ({
           blocks: s.blocks.map((b) => (b.id === blockId ? { ...b, memberId } : b)),
+          blockTransfers: pushTransfer(s.blockTransfers, {
+            blockId,
+            raffleId: block.raffleId,
+            toMemberId: memberId,
+            kind: 'assign',
+            note: 'Atribuição inicial (Equipe)',
+          }),
         }))
         return { ok: true }
       },
 
-      transferBlock: (blockId, toMemberId) => get().assignBlock(blockId, toMemberId),
+      transferBlock: (blockId, toMemberId) => {
+        const block = get().blocks.find((b) => b.id === blockId)
+        if (!block) return { ok: false, error: 'Bloco não encontrado.' }
+        if (!block.memberId) {
+          return { ok: false, error: 'Bloco livre. Atribua primeiro na aba Equipe.' }
+        }
+        if (block.memberId === toMemberId) return { ok: false, error: 'Bloco já está com este membro.' }
+        if (!get().members.some((m) => m.id === toMemberId && m.active)) return { ok: false, error: 'Membro inválido.' }
+        const st = get().blockStats(blockId)
+        if (st.open <= 0) {
+          return { ok: false, error: 'Esse bloco não pode ser transferido: está vendido (sem números abertos).' }
+        }
+        const fromMemberId = block.memberId
+        set((s) => ({
+          blocks: s.blocks.map((b) => (b.id === blockId ? { ...b, memberId: toMemberId } : b)),
+          blockTransfers: pushTransfer(s.blockTransfers, {
+            blockId,
+            raffleId: block.raffleId,
+            fromMemberId,
+            toMemberId,
+            kind: 'transfer',
+            note: 'Transferência entre membros',
+          }),
+        }))
+        return { ok: true }
+      },
 
-      unassignBlock: (blockId) =>
+      unassignBlock: (blockId) => {
+        const block = get().blocks.find((b) => b.id === blockId)
+        if (!block?.memberId) {
+          set((s) => ({
+            blocks: s.blocks.map((b) => (b.id === blockId ? { ...b, memberId: undefined } : b)),
+          }))
+          return
+        }
+        const fromMemberId = block.memberId
         set((s) => ({
           blocks: s.blocks.map((b) => (b.id === blockId ? { ...b, memberId: undefined } : b)),
-        })),
+          blockTransfers: pushTransfer(s.blockTransfers, {
+            blockId,
+            raffleId: block.raffleId,
+            fromMemberId,
+            kind: 'unassign',
+            note: 'Bloco liberado',
+          }),
+        }))
+      },
 
       assignRange: (input) => {
         const raffle = get().raffles.find((r) => r.id === input.raffleId)
@@ -358,6 +435,9 @@ export const useStore = create<Store>()(
         if (input.paymentMethod === 'pix' && !input.pixDestination) {
           return { ok: false, error: 'Informe se o PIX foi para a entidade ou para o vendedor.' }
         }
+        if (input.paymentMethod === 'dinheiro' && !input.cashDestination) {
+          return { ok: false, error: 'Informe se o dinheiro ficou com o vendedor ou foi pra loja.' }
+        }
 
         const allowed = new Set(get().memberNumbers(input.memberId, input.raffleId, input.blockId))
         for (const n of input.numbers) {
@@ -383,9 +463,11 @@ export const useStore = create<Store>()(
           status: saleStatus(totalAmount, paidAmount),
           paymentMethod: input.paymentMethod,
           pixDestination: input.paymentMethod === 'pix' ? input.pixDestination : undefined,
+          cashDestination: input.paymentMethod === 'dinheiro' ? input.cashDestination : undefined,
           notes: input.notes?.trim() || undefined,
           createdAt: new Date().toISOString(),
           blockId: input.blockId,
+          proofImageDataUrl: input.proofImageDataUrl || undefined,
         }
 
         const proofTxid = input.proofTxid?.trim()
@@ -679,6 +761,7 @@ export const useStore = create<Store>()(
           amortizations: s.amortizations,
           pixCharges: s.pixCharges,
           memberSettlements: s.memberSettlements,
+          blockTransfers: s.blockTransfers,
         }
       },
 
@@ -696,6 +779,7 @@ export const useStore = create<Store>()(
           amortizations: data.amortizations || [],
           pixCharges: data.pixCharges || [],
           memberSettlements: data.memberSettlements || [],
+          blockTransfers: data.blockTransfers || [],
         })
         return { ok: true }
       },
@@ -753,6 +837,7 @@ export const useStore = create<Store>()(
               paidAmount: 30,
               status: 'quitado',
               paymentMethod: 'dinheiro',
+              cashDestination: 'vendedor',
               createdAt: now,
             },
           ],
@@ -760,6 +845,44 @@ export const useStore = create<Store>()(
           amortizations: [],
           pixCharges: [],
           memberSettlements: [],
+          blockTransfers: [
+            {
+              id: uid(),
+              blockId: blocks[0].id,
+              raffleId,
+              toMemberId: m1,
+              kind: 'assign',
+              createdAt: now,
+              note: 'Demo',
+            },
+            {
+              id: uid(),
+              blockId: blocks[1].id,
+              raffleId,
+              toMemberId: m1,
+              kind: 'assign',
+              createdAt: now,
+              note: 'Demo',
+            },
+            {
+              id: uid(),
+              blockId: blocks[2].id,
+              raffleId,
+              toMemberId: m2,
+              kind: 'assign',
+              createdAt: now,
+              note: 'Demo',
+            },
+            {
+              id: uid(),
+              blockId: blocks[3].id,
+              raffleId,
+              toMemberId: m2,
+              kind: 'assign',
+              createdAt: now,
+              note: 'Demo',
+            },
+          ],
         })
       },
 
@@ -784,11 +907,14 @@ export const useStore = create<Store>()(
             ...s,
             memberId: s.memberId || '',
             paymentMethod: s.paymentMethod || 'pix',
+            cashDestination:
+              s.paymentMethod === 'dinheiro' ? s.cashDestination || ('vendedor' as const) : s.cashDestination,
           })),
           pixPayments: p.pixPayments || [],
           amortizations: p.amortizations || [],
           pixCharges: p.pixCharges || [],
           memberSettlements: p.memberSettlements || [],
+          blockTransfers: p.blockTransfers || [],
         }
       },
     },

@@ -438,11 +438,22 @@ th {
   font-size: 1.45rem;
 }
 
-.auth-error {
-  margin: 0;
-  color: var(--danger);
-  font-size: 0.9rem;
-  font-weight: 600;
+.proof-thumb {
+  display: block;
+  width: min(100%, 280px);
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  margin-top: 0.35rem;
+}
+
+.proof-thumb-sm {
+  display: block;
+  width: 64px;
+  height: 64px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  margin-top: 0.35rem;
 }
 
 @media (max-width: 900px) {

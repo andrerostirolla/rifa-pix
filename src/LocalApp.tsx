@@ -43,6 +43,7 @@ export default function LocalApp() {
   const [toast, setToast] = useState<string | null>(null)
   const [csvText, setCsvText] = useState('')
   const [importPreview, setImportPreview] = useState<ReturnType<typeof parsePixCsv> | null>(null)
+  const [proofPreview, setProofPreview] = useState<string | null>(null)
 
   const raffles = useStore((s) => s.raffles)
   const sales = useStore((s) => s.sales)
@@ -128,15 +129,46 @@ export default function LocalApp() {
       showToast(`Número ${String(clash).padStart(2, '0')} já vendido.`)
       return
     }
-    addSale({
+    const proofTxid = String(fd.get('proofTxid') || '').trim()
+    if (!proofTxid) {
+      showToast('Informe o TXID ou End-to-end do comprovante antes de salvar.')
+      return
+    }
+    const sale = addSale({
       raffleId,
       buyerName: String(fd.get('buyerName') || ''),
       buyerPhone: String(fd.get('buyerPhone') || ''),
       numbers: parsed.numbers,
       notes: String(fd.get('notes') || ''),
+      proofTxid,
+      proofImageDataUrl: proofPreview || undefined,
     })
+    if (!sale) {
+      showToast('Não foi possível salvar a venda.')
+      return
+    }
     e.currentTarget.reset()
-    showToast('Venda registrada.')
+    setProofPreview(null)
+    showToast('Venda salva com TXID do comprovante. Compensação virá no extrato CSV.')
+    setTab('cobrancas')
+  }
+
+  const onProofFile = async (file: File | null) => {
+    if (!file) {
+      setProofPreview(null)
+      return
+    }
+    if (!file.type.startsWith('image/')) {
+      showToast('Envie uma imagem (print/foto do comprovante).')
+      return
+    }
+    if (file.size > 2_500_000) {
+      showToast('Imagem grande demais (máx. ~2,5 MB).')
+      return
+    }
+    const reader = new FileReader()
+    reader.onload = () => setProofPreview(String(reader.result || ''))
+    reader.readAsDataURL(file)
   }
 
   const onCreatePix = (e: FormEvent<HTMLFormElement>) => {
@@ -524,7 +556,9 @@ export default function LocalApp() {
             <div className="panel-head">
               <div>
                 <h2>Registrar venda</h2>
-                <p>Números separados por vírgula. Total calculado pelo preço da rifa.</p>
+                <p>
+                  Cliente paga com <strong>Pix dinâmico do banco</strong> → você anexa o comprovante (TXID/E2E) → depois o CSV compensa.
+                </p>
               </div>
             </div>
             <div className="form-grid">
@@ -557,10 +591,26 @@ export default function LocalApp() {
                 Observações
                 <textarea name="notes" placeholder="Combinado de pagamento, etc." />
               </label>
+              <label className="full">
+                TXID ou End-to-end do comprovante
+                <input name="proofTxid" required placeholder="Cole o código do print/foto do comprovante" />
+              </label>
+              <label className="full">
+                Foto/print do comprovante (opcional)
+                <input type="file" accept="image/*" capture="environment" onChange={(e) => onProofFile(e.target.files?.[0] || null)} />
+              </label>
+              {proofPreview && (
+                <div className="full">
+                  <img src={proofPreview} alt="Comprovante" className="proof-thumb" />
+                  <button type="button" className="btn btn-ghost" onClick={() => setProofPreview(null)}>
+                    Remover imagem
+                  </button>
+                </div>
+              )}
             </div>
             <div className="btn-row">
               <button className="btn btn-primary" type="submit" disabled={!raffles.length}>
-                Salvar venda
+                Salvar venda com TXID
               </button>
             </div>
           </form>
@@ -906,7 +956,14 @@ export default function LocalApp() {
                     const sale = sales.find((s) => s.id === c.saleId)
                     return (
                       <tr key={c.id}>
-                        <td>{sale?.buyerName || '—'}</td>
+                        <td>
+                          {sale?.buyerName || '—'}
+                          {c.proofImageDataUrl && (
+                            <div>
+                              <img src={c.proofImageDataUrl} alt="Comprovante" className="proof-thumb-sm" />
+                            </div>
+                          )}
+                        </td>
                         <td>
                           <code>{c.txid}</code>
                         </td>

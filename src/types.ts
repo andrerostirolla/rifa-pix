@@ -53,6 +53,8 @@ export interface PixCharge {
   createdAt: string
   paidAt?: string
   note?: string
+  /** Foto/print do comprovante (data URL), opcional */
+  proofImageDataUrl?: string
 }
 
 export interface AppState {

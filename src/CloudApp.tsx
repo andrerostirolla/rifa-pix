@@ -52,6 +52,7 @@ export default function CloudApp() {
   const [csvText, setCsvText] = useState('')
   const [importPreview, setImportPreview] = useState<ReturnType<typeof parsePixCsv> | null>(null)
   const [manualTxid, setManualTxid] = useState('')
+  const [proofPreview, setProofPreview] = useState<string | null>(null)
 
   const showToast = (msg: string) => {
     setToast(msg)
@@ -134,8 +135,10 @@ export default function CloudApp() {
     const taken = takenNumbers.get(raffleId) ?? new Set()
     const clash = parsed.numbers.find((n) => taken.has(n))
     if (clash !== undefined) return showToast(`Número ${String(clash).padStart(2, '0')} já vendido.`)
+    const proofTxid = String(fd.get('proofTxid') || '').trim()
+    if (!proofTxid) return showToast('Informe o TXID ou End-to-end do comprovante.')
     try {
-      await api.createSale(userId, {
+      const sale = await api.createSale(userId, {
         raffleId,
         buyerName: String(fd.get('buyerName') || ''),
         buyerPhone: String(fd.get('buyerPhone') || ''),
@@ -143,9 +146,12 @@ export default function CloudApp() {
         totalAmount: parsed.numbers.length * Number(raffle.ticket_price),
         notes: String(fd.get('notes') || ''),
       })
+      await api.attachTxidToSale(userId, sale.id, proofTxid)
       e.currentTarget.reset()
+      setProofPreview(null)
       await refresh()
-      showToast('Venda salva no banco.')
+      setTab('cobrancas')
+      showToast('Venda salva com TXID do comprovante. Compensação no CSV.')
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Erro ao salvar venda')
     }
@@ -417,6 +423,7 @@ export default function CloudApp() {
             <div className="panel-head">
               <div>
                 <h2>Registrar venda</h2>
+                <p>Pague no Pix dinâmico do banco, cole o TXID/E2E do comprovante e salve. O CSV compensa depois.</p>
               </div>
             </div>
             <div className="form-grid">
@@ -449,10 +456,30 @@ export default function CloudApp() {
                 Obs.
                 <textarea name="notes" />
               </label>
+              <label className="full">
+                TXID ou End-to-end do comprovante
+                <input name="proofTxid" required placeholder="Cole do print/foto" />
+              </label>
+              <label className="full">
+                Foto/print (opcional, só referência)
+                <input
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0]
+                    if (!file) return setProofPreview(null)
+                    const reader = new FileReader()
+                    reader.onload = () => setProofPreview(String(reader.result || ''))
+                    reader.readAsDataURL(file)
+                  }}
+                />
+              </label>
+              {proofPreview && <img src={proofPreview} alt="Comprovante" className="proof-thumb" />}
             </div>
             <div className="btn-row">
               <button className="btn btn-primary" type="submit">
-                Salvar
+                Salvar venda com TXID
               </button>
             </div>
           </form>

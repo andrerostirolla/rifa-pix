@@ -32,7 +32,10 @@ type Store = AppState & {
     buyerPhone?: string
     numbers: number[]
     notes?: string
-  }) => void
+    /** TXID ou End-to-end copiado do comprovante (Pix dinâmico do banco) */
+    proofTxid?: string
+    proofImageDataUrl?: string
+  }) => Sale | null
   removeSale: (id: string) => void
   addPix: (input: {
     amount: number
@@ -59,7 +62,7 @@ type Store = AppState & {
     unmatchedWithTxid: number
   }
   createChargeForSale: (saleId: string, amount?: number) => { ok: true; charge: PixCharge } | { ok: false; error: string }
-  attachTxidToSale: (saleId: string, txid: string, amount?: number) => { ok: true; charge: PixCharge } | { ok: false; error: string }
+  attachTxidToSale: (saleId: string, txid: string, amount?: number, proofImageDataUrl?: string) => { ok: true; charge: PixCharge } | { ok: false; error: string }
   removePix: (id: string) => void
   amortize: (saleId: string, pixPaymentId: string, amount: number, note?: string) => {
     ok: boolean
@@ -110,7 +113,7 @@ export const useStore = create<Store>()(
 
       addSale: (input) => {
         const raffle = get().raffles.find((r) => r.id === input.raffleId)
-        if (!raffle) return
+        if (!raffle) return null
         const totalAmount = input.numbers.length * raffle.ticketPrice
         const sale: Sale = {
           id: uid(),
@@ -124,7 +127,26 @@ export const useStore = create<Store>()(
           notes: input.notes?.trim() || undefined,
           createdAt: new Date().toISOString(),
         }
-        set((s) => ({ sales: [sale, ...s.sales] }))
+
+        const proofTxid = input.proofTxid?.trim()
+        const charge: PixCharge | null = proofTxid
+          ? {
+              id: uid(),
+              saleId: sale.id,
+              txid: proofTxid,
+              amount: totalAmount,
+              status: 'pending',
+              createdAt: new Date().toISOString(),
+              note: 'TXID/E2E do comprovante — aguardando compensação no extrato CSV',
+              proofImageDataUrl: input.proofImageDataUrl || undefined,
+            }
+          : null
+
+        set((s) => ({
+          sales: [sale, ...s.sales],
+          pixCharges: charge ? [charge, ...s.pixCharges] : s.pixCharges,
+        }))
+        return sale
       },
 
       removeSale: (id) =>
@@ -272,7 +294,7 @@ export const useStore = create<Store>()(
         return { ok: true, charge }
       },
 
-      attachTxidToSale: (saleId, txid, amount) => {
+      attachTxidToSale: (saleId, txid, amount, proofImageDataUrl) => {
         const clean = txid.trim()
         if (!clean) return { ok: false, error: 'Informe o TXID.' }
         const sale = get().sales.find((s) => s.id === saleId)
@@ -289,7 +311,8 @@ export const useStore = create<Store>()(
           amount: value,
           status: 'pending',
           createdAt: new Date().toISOString(),
-          note: 'TXID informado manualmente (banco/PSP)',
+          note: 'TXID/E2E do comprovante (Pix dinâmico do banco)',
+          proofImageDataUrl: proofImageDataUrl || undefined,
         }
         set((s) => ({ pixCharges: [charge, ...s.pixCharges] }))
         return { ok: true, charge }

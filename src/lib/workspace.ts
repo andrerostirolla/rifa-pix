@@ -146,6 +146,24 @@ export async function saveByAccessCode(
   return (data as { updatedAt: string }).updatedAt
 }
 
+export async function fetchOwnerWorkspace(workspaceId: string): Promise<{ meta: WorkspaceMeta; state: AppState }> {
+  const sb = client()
+  const { data, error } = await sb.from('workspaces').select('*').eq('id', workspaceId).single()
+  if (error) throw error
+  const row = data as {
+    id: string
+    name: string
+    access_code: string
+    updated_at: string
+    owner_id: string
+    state: AppState
+  }
+  return {
+    meta: mapWorkspace(row),
+    state: row.state,
+  }
+}
+
 export async function fetchByAccessCode(accessCode: string): Promise<{ meta: WorkspaceMeta; state: AppState }> {
   const sb = client()
   const { data, error } = await sb.rpc('fetch_workspace_by_code', { p_code: accessCode.trim() })

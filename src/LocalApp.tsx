@@ -272,39 +272,53 @@ export default function LocalApp() {
           </p>
         </div>
         <div className="top-actions">
-          <nav className="nav">
-            {isAdmin
-              ? (
-                  [
-                    ['painel', 'Painel'],
-                    ['equipe', 'Equipe'],
-                    ['transferencias', 'Transferências'],
-                    ['eventos', 'Eventos'],
-                    ['vendas', 'Vendas'],
-                    ['pix', 'PIX/CSV'],
-                    ['txid', 'TXID'],
-                    ['amortizacao', 'Baixas'],
-                    ['relatorios', 'Relatórios'],
-                  ] as const
-                ).map(([id, label]) => (
-                  <button key={id} type="button" className={adminTab === id ? 'active' : ''} onClick={() => setAdminTab(id)}>
-                    {label}
-                  </button>
-                ))
-              : (
-                  [
-                    ['blocos', 'Meus blocos'],
-                    ['vendas', 'Minhas vendas'],
-                  ] as const
-                ).map(([id, label]) => (
-                  <button key={id} type="button" className={memberTab === id ? 'active' : ''} onClick={() => setMemberTab(id)}>
-                    {label}
-                  </button>
-                ))}
-          </nav>
+          <div className="nav-scroll">
+            <nav className="nav" aria-label="Menu principal">
+              {isAdmin
+                ? (
+                    [
+                      ['painel', 'Painel', 'Painel'],
+                      ['equipe', 'Equipe', 'Equipe'],
+                      ['transferencias', 'Transferências', 'Transf.'],
+                      ['eventos', 'Eventos', 'Eventos'],
+                      ['vendas', 'Vendas', 'Vendas'],
+                      ['pix', 'PIX/CSV', 'PIX'],
+                      ['txid', 'TXID', 'TXID'],
+                      ['amortizacao', 'Baixas', 'Baixas'],
+                      ['relatorios', 'Relatórios', 'Relat.'],
+                    ] as const
+                  ).map(([id, full, short]) => (
+                    <button
+                      key={id}
+                      type="button"
+                      className={adminTab === id ? 'active' : ''}
+                      onClick={() => setAdminTab(id)}
+                    >
+                      <span className="nav-label-full">{full}</span>
+                      <span className="nav-label-short">{short}</span>
+                    </button>
+                  ))
+                : (
+                    [
+                      ['blocos', 'Meus blocos', 'Blocos'],
+                      ['vendas', 'Minhas vendas', 'Vendas'],
+                    ] as const
+                  ).map(([id, full, short]) => (
+                    <button
+                      key={id}
+                      type="button"
+                      className={memberTab === id ? 'active' : ''}
+                      onClick={() => setMemberTab(id)}
+                    >
+                      <span className="nav-label-full">{full}</span>
+                      <span className="nav-label-short">{short}</span>
+                    </button>
+                  ))}
+            </nav>
+          </div>
           <button
             type="button"
-            className="btn btn-secondary"
+            className="btn btn-secondary btn-sair"
             onClick={async () => {
               saveCloudSession(null)
               logout()

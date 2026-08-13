@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { persist } from 'zustand/middleware'
+import { createJSONStorage, persist } from 'zustand/middleware'
 import type { ParsedPixRow } from './csvImport'
 import { makeLocalTxid, previewTxidMatches } from './txidMatch'
 import type {
@@ -149,6 +149,26 @@ const empty: AppState = {
   memberSettlements: [],
   blockTransfers: [],
 }
+
+const PERSIST_KEY = 'rifa-pix-v3-blocks'
+
+/** Cache local inchado com comprovantes base64 — limpa para o Safari voltar a gravar. */
+function purgeOversizedLocalCache() {
+  try {
+    const raw = localStorage.getItem(PERSIST_KEY)
+    if (!raw || raw.length < 1_500_000) return
+    localStorage.removeItem(PERSIST_KEY)
+    console.warn('Cache local do RifaPIX limpo (estava grande demais para o Safari).')
+  } catch {
+    try {
+      localStorage.removeItem(PERSIST_KEY)
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+purgeOversizedLocalCache()
 
 function pushTransfer(
   list: BlockTransfer[],
@@ -898,7 +918,44 @@ export const useStore = create<Store>()(
       resetAll: () => set({ ...empty }),
     }),
     {
-      name: 'rifa-pix-v3-blocks',
+      name: PERSIST_KEY,
+      // Não grava base64 de comprovante no Safari (estoura ~5 MB e gera "quota exceeded")
+      partialize: (state) => ({
+        raffles: state.raffles,
+        members: state.members,
+        blocks: state.blocks,
+        numberRanges: state.numberRanges,
+        sales: state.sales.map((s) =>
+          s.proofImageDataUrl ? { ...s, proofImageDataUrl: undefined } : s,
+        ),
+        pixPayments: state.pixPayments,
+        amortizations: state.amortizations,
+        pixCharges: state.pixCharges.map((c) =>
+          c.proofImageDataUrl ? { ...c, proofImageDataUrl: undefined } : c,
+        ),
+        memberSettlements: state.memberSettlements,
+        blockTransfers: state.blockTransfers,
+      }),
+      storage: createJSONStorage(() => ({
+        getItem: (name) => localStorage.getItem(name),
+        setItem: (name, value) => {
+          try {
+            localStorage.setItem(name, value)
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err)
+            if (!/quota/i.test(msg) && !(err instanceof DOMException && err.name === 'QuotaExceededError')) {
+              throw err
+            }
+            try {
+              localStorage.removeItem(name)
+              localStorage.setItem(name, value)
+            } catch {
+              console.warn('Safari sem espaço local; estado fica só em memória nesta sessão.')
+            }
+          }
+        },
+        removeItem: (name) => localStorage.removeItem(name),
+      })),
       merge: (persisted, current) => {
         const p = (persisted || {}) as Partial<AppState>
         return {

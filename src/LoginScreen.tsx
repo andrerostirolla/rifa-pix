@@ -175,7 +175,14 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
       setPin(unlocked.pin)
       await finishMemberLogin(unlocked.workspaceCode, unlocked.memberId, unlocked.pin, unlocked.memberName)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Falha no Face ID')
+      const msg = err instanceof Error ? err.message : 'Falha no Face ID'
+      if (/quota/i.test(msg)) {
+        setError(
+          'Armazenamento do Safari cheio. Em Ajustes → Safari → Avançado → Dados de sites, apague andrerostirolla.github.io e tente de novo.',
+        )
+      } else {
+        setError(msg)
+      }
     } finally {
       setBusy(false)
     }
@@ -266,7 +273,14 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
         onLocalAuthenticated()
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Falha na autenticação.')
+      const msg = err instanceof Error ? err.message : 'Falha na autenticação.'
+      if (/quota/i.test(msg)) {
+        setError(
+          'Armazenamento do Safari cheio. Em Ajustes → Safari → Avançado → Dados de sites, apague andrerostirolla.github.io e tente de novo. (Não dá para limpar isso remotamente.)',
+        )
+      } else {
+        setError(msg)
+      }
     } finally {
       setBusy(false)
     }

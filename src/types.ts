@@ -74,7 +74,9 @@ export interface Sale {
   createdAt: string
   /** Bloco de origem da venda, quando aplicável */
   blockId?: string
-  /** Comprovante (imagem ou PDF em data URL) */
+  /** Comprovante no Storage (caminho no bucket) */
+  proofPath?: string
+  /** Legado: data URL embutida (migrar para proofPath) */
   proofImageDataUrl?: string
 }
 

@@ -4,6 +4,7 @@ import { getAuthRecord, getSession, logout } from './auth'
 import { parsePixCsv, SAMPLE_CSV } from './csvImport'
 import { NumberGrid } from './NumberGrid'
 import { isSupabaseConfigured, supabase } from './lib/supabase'
+import { openProofUrl, resolveProofUrl, uploadProofFile } from './lib/proofs'
 import { loadCloudSession, saveCloudSession } from './lib/workspace'
 import { brl, formatNumbers, useStore } from './store'
 import { TeamChat } from './TeamChat'
@@ -22,33 +23,6 @@ const statusLabel: Record<PaymentStatus, string> = {
   divergente: 'Divergente',
 }
 
-function openProof(dataUrl: string) {
-  try {
-    const [header, b64] = dataUrl.split(',')
-    if (!b64) {
-      window.open(dataUrl, '_blank', 'noopener,noreferrer')
-      return
-    }
-    const mime = header.match(/data:([^;]+)/)?.[1] || 'application/octet-stream'
-    const bin = atob(b64)
-    const bytes = new Uint8Array(bin.length)
-    for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i)
-    const url = URL.createObjectURL(new Blob([bytes], { type: mime }))
-    window.open(url, '_blank', 'noopener,noreferrer')
-  } catch {
-    window.open(dataUrl, '_blank', 'noopener,noreferrer')
-  }
-}
-
-async function fileToDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(String(reader.result || ''))
-    reader.onerror = () => reject(new Error('Falha ao ler arquivo'))
-    reader.readAsDataURL(file)
-  })
-}
-
 function ProofIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -62,6 +36,24 @@ function ProofIcon() {
       <path d="M8 13h8M8 17h5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
     </svg>
   )
+}
+
+async function fileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(new Error('Falha ao ler arquivo'))
+    reader.readAsDataURL(file)
+  })
+}
+
+function proofUrlForSale(
+  sale: { id: string; proofPath?: string; proofImageDataUrl?: string },
+  charges: Array<{ saleId: string; proofImageDataUrl?: string }>,
+) {
+  const fromSale = resolveProofUrl(sale)
+  if (fromSale) return fromSale
+  return charges.find((c) => c.saleId === sale.id)?.proofImageDataUrl || ''
 }
 
 export default function LocalApp() {
@@ -218,15 +210,24 @@ export default function LocalApp() {
     const fd = new FormData(e.currentTarget)
     const sellerId = isAdmin ? String(fd.get('memberId') || '') : memberId
     const raffleId = String(fd.get('raffleId') || currentRaffleId)
-    let proof = proofDataUrl
     const file = (e.currentTarget.elements.namedItem('proofFile') as HTMLInputElement | null)?.files?.[0]
+    const cloudReady = isSupabaseConfigured && Boolean(loadCloudSession()?.workspace.id)
+
+    let proofPath: string | undefined
+    let proofImageDataUrl: string | undefined
     if (file) {
       try {
-        proof = await fileToDataUrl(file)
-      } catch {
-        return showToast('Não foi possível ler o comprovante.')
+        if (cloudReady) {
+          const up = await uploadProofFile(crypto.randomUUID(), file)
+          proofPath = up.path
+        } else {
+          proofImageDataUrl = proofDataUrl || (await fileToDataUrl(file))
+        }
+      } catch (err) {
+        return showToast(err instanceof Error ? err.message : 'Não foi possível enviar o comprovante.')
       }
     }
+
     const result = addSale({
       raffleId,
       memberId: sellerId,
@@ -238,7 +239,8 @@ export default function LocalApp() {
       cashDestination: paymentMethod === 'dinheiro' ? cashDestination : undefined,
       notes: String(fd.get('notes') || ''),
       proofTxid: String(fd.get('proofTxid') || ''),
-      proofImageDataUrl: proof || undefined,
+      proofPath,
+      proofImageDataUrl,
       receivedNow: paymentMethod === 'dinheiro' || String(fd.get('receivedNow') || '') === 'sim',
       blockId: openBlockId || undefined,
     })
@@ -248,7 +250,7 @@ export default function LocalApp() {
     setPaymentMethod('dinheiro')
     setCashDestination('vendedor')
     setProofDataUrl('')
-    showToast('Venda registrada.')
+    showToast(proofPath ? 'Venda registrada (comprovante na nuvem).' : 'Venda registrada.')
   }
 
   if (!session) {
@@ -536,20 +538,14 @@ export default function LocalApp() {
                         {s.paymentMethod === 'dinheiro'
                           ? `Dinheiro (${s.cashDestination === 'loja' ? 'loja' : 'vendedor'})`
                           : `PIX (${s.pixDestination === 'entidade' ? 'entidade' : 'vendedor'})`}
-                        {(s.proofImageDataUrl || pixCharges.find((c) => c.saleId === s.id)?.proofImageDataUrl) && (
+                        {proofUrlForSale(s, pixCharges) && (
                           <>
                             {' · '}
                             <button
                               type="button"
                               className="btn-proof"
                               title="Abrir comprovante"
-                              onClick={() =>
-                                openProof(
-                                  s.proofImageDataUrl ||
-                                    pixCharges.find((c) => c.saleId === s.id)?.proofImageDataUrl ||
-                                    '',
-                                )
-                              }
+                              onClick={() => openProofUrl(proofUrlForSale(s, pixCharges))}
                             >
                               <ProofIcon />
                             </button>
@@ -1186,18 +1182,12 @@ export default function LocalApp() {
                       <span className={`badge ${s.status}`}>{statusLabel[s.status]}</span>
                     </td>
                     <td>
-                      {(s.proofImageDataUrl || pixCharges.find((c) => c.saleId === s.id)?.proofImageDataUrl) ? (
+                      {proofUrlForSale(s, pixCharges) ? (
                         <button
                           type="button"
                           className="btn-proof"
                           title="Abrir comprovante"
-                          onClick={() =>
-                            openProof(
-                              s.proofImageDataUrl ||
-                                pixCharges.find((c) => c.saleId === s.id)?.proofImageDataUrl ||
-                                '',
-                            )
-                          }
+                          onClick={() => openProofUrl(proofUrlForSale(s, pixCharges))}
                         >
                           <ProofIcon />
                         </button>
@@ -1541,8 +1531,7 @@ export default function LocalApp() {
                     {[...sales]
                       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
                       .map((s) => {
-                        const proof =
-                          s.proofImageDataUrl || pixCharges.find((c) => c.saleId === s.id)?.proofImageDataUrl
+                        const proof = proofUrlForSale(s, pixCharges)
                         const loja =
                           s.paymentMethod === 'dinheiro' && s.cashDestination === 'loja' ? s.paidAmount : 0
                         return (
@@ -1569,7 +1558,7 @@ export default function LocalApp() {
                                   type="button"
                                   className="btn-proof"
                                   title="Abrir comprovante"
-                                  onClick={() => openProof(proof)}
+                                  onClick={() => openProofUrl(proof)}
                                 >
                                   <ProofIcon />
                                 </button>

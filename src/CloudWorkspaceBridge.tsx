@@ -14,6 +14,7 @@ import {
   saveOwnerWorkspaceState,
   type CloudSession,
 } from './lib/workspace'
+import { offloadEmbeddedProofs } from './lib/proofs'
 import { useStore } from './store'
 import type { AppState } from './types'
 
@@ -103,6 +104,23 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
     }
   }
 
+  const migrateProofsIfNeeded = async (state: AppState): Promise<{ state: AppState; moved: number }> => {
+    try {
+      const { state: next, moved, errors } = await offloadEmbeddedProofs(state, sessionRef.current?.workspace.id)
+      if (errors.length) console.warn('Migração de comprovantes:', errors)
+      if (moved <= 0) return { state, moved: 0 }
+      applyingRemoteRef.current = true
+      useStore.getState().importSnapshot(next)
+      window.setTimeout(() => {
+        applyingRemoteRef.current = false
+      }, 0)
+      return { state: next, moved }
+    } catch (err) {
+      console.warn('Falha ao migrar comprovantes para Storage', err)
+      return { state, moved: 0 }
+    }
+  }
+
   const pushNow = async () => {
     const session = sessionRef.current || loadCloudSession()
     if (!session || savingRef.current || applyingRemoteRef.current) return
@@ -110,7 +128,7 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
     dirtyRef.current = false
     setSyncStatus('salvando')
     try {
-      const state = snapshotFromStore()
+      const { state } = await migrateProofsIfNeeded(snapshotFromStore())
       let updatedAt: string
       if (session.role === 'admin') {
         if (!session.workspace.id) throw new Error('Workspace sem id')
@@ -227,6 +245,15 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
         } else {
           onError('Sessão inválida para este modo.')
           return
+        }
+
+        // Move comprovantes base64 antigos para o Storage e enxuga o JSON
+        if (alive) {
+          const { moved } = await migrateProofsIfNeeded(snapshotFromStore())
+          if (moved > 0) {
+            dirtyRef.current = true
+            await pushNow()
+          }
         }
 
         if (alive) {

@@ -83,9 +83,11 @@ type Store = AppState & {
     notes?: string
     proofTxid?: string
     proofImageDataUrl?: string
+    proofPath?: string
     receivedNow?: boolean
     blockId?: string
   }) => { ok: true; sale: Sale } | { ok: false; error: string }
+  patchSale: (id: string, patch: Partial<Pick<Sale, 'proofPath' | 'proofImageDataUrl' | 'notes'>>) => void
   removeSale: (id: string) => void
   addPix: (input: {
     amount: number
@@ -467,7 +469,9 @@ export const useStore = create<Store>()(
           notes: input.notes?.trim() || undefined,
           createdAt: new Date().toISOString(),
           blockId: input.blockId,
-          proofImageDataUrl: input.proofImageDataUrl || undefined,
+          proofPath: input.proofPath || undefined,
+          // só mantém data URL se ainda não houver path (modo local / fallback)
+          proofImageDataUrl: input.proofPath ? undefined : input.proofImageDataUrl || undefined,
         }
 
         const proofTxid = input.proofTxid?.trim()
@@ -481,7 +485,7 @@ export const useStore = create<Store>()(
                 status: 'pending',
                 createdAt: new Date().toISOString(),
                 note: 'TXID/E2E do comprovante — aguardando CSV',
-                proofImageDataUrl: input.proofImageDataUrl || undefined,
+                proofImageDataUrl: input.proofPath ? undefined : input.proofImageDataUrl || undefined,
               }
             : null
 
@@ -491,6 +495,11 @@ export const useStore = create<Store>()(
         }))
         return { ok: true, sale }
       },
+
+      patchSale: (id, patch) =>
+        set((s) => ({
+          sales: s.sales.map((sale) => (sale.id === id ? { ...sale, ...patch } : sale)),
+        })),
 
       removeSale: (id) =>
         set((s) => {

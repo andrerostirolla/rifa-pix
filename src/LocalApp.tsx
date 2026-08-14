@@ -14,7 +14,6 @@ import type { CashDestination, PaymentMethod, PaymentStatus, PixDestination } fr
 
 type AdminTab = 'painel' | 'equipe' | 'transferencias' | 'eventos' | 'vendas' | 'pix' | 'txid' | 'amortizacao' | 'relatorios'
 type MemberTab = 'blocos' | 'vendas'
-type ReportSection = 'prestacao' | 'vendas' | 'transferencias'
 
 const statusLabel: Record<PaymentStatus, string> = {
   pendente: 'Pendente',
@@ -76,7 +75,9 @@ export default function LocalApp() {
   const [transferBlockId, setTransferBlockId] = useState('')
   const [transferEventId, setTransferEventId] = useState('')
   const [proofDataUrl, setProofDataUrl] = useState('')
-  const [reportSection, setReportSection] = useState<ReportSection>('prestacao')
+  const [reportMemberId, setReportMemberId] = useState('')
+  const [reportEventId, setReportEventId] = useState('')
+  const [reportDetail, setReportDetail] = useState<'resumo' | 'vendas' | 'blocos' | 'baixas' | 'movimentos'>('resumo')
   const [csvText, setCsvText] = useState('')
   const [importPreview, setImportPreview] = useState<ReturnType<typeof parsePixCsv> | null>(null)
 
@@ -144,57 +145,99 @@ export default function LocalApp() {
   }, [importPreview, pixCharges])
 
   const reports = useMemo(() => {
-    return members.map((m) => {
-      const mSales = sales.filter((s) => s.memberId === m.id)
-      const soldCount = mSales.reduce((acc, s) => acc + s.numbers.length, 0)
-      const expected = mSales.reduce((acc, s) => acc + s.totalAmount, 0)
-      const received = mSales.reduce((acc, s) => acc + s.paidAmount, 0)
-      const cashVendedor = mSales
-        .filter((s) => s.paymentMethod === 'dinheiro' && (s.cashDestination || 'vendedor') === 'vendedor')
-        .reduce((acc, s) => acc + s.paidAmount, 0)
-      const cashLoja = mSales
-        .filter((s) => s.paymentMethod === 'dinheiro' && s.cashDestination === 'loja')
-        .reduce((acc, s) => acc + s.paidAmount, 0)
-      const cash = cashVendedor + cashLoja
-      const pixEntidade = mSales
-        .filter((s) => s.paymentMethod === 'pix' && s.pixDestination === 'entidade')
-        .reduce((acc, s) => acc + s.paidAmount, 0)
-      const pixVendedor = mSales
-        .filter((s) => s.paymentMethod === 'pix' && s.pixDestination === 'vendedor')
-        .reduce((acc, s) => acc + s.paidAmount, 0)
-      const settledCash = memberSettlements.filter((x) => x.memberId === m.id && x.kind === 'dinheiro').reduce((a, x) => a + x.amount, 0)
-      const settledPix = memberSettlements
-        .filter((x) => x.memberId === m.id && x.kind === 'pix_vendedor')
-        .reduce((a, x) => a + x.amount, 0)
-      return {
-        member: m,
-        soldCount,
-        expected,
-        received,
-        cash,
-        cashVendedor,
-        cashLoja,
-        pixEntidade,
-        pixVendedor,
-        cashOpen: Math.max(0, cashVendedor - settledCash),
-        pixVendedorOpen: Math.max(0, pixVendedor - settledPix),
-      }
-    })
-  }, [members, sales, memberSettlements])
+    return members
+      .filter((m) => m.active)
+      .map((m) => {
+        const mSalesAll = sales.filter((s) => s.memberId === m.id)
+        const mSales = reportEventId ? mSalesAll.filter((s) => s.raffleId === reportEventId) : mSalesAll
+        const soldCount = mSales.reduce((acc, s) => acc + s.numbers.length, 0)
+        const saleCount = mSales.length
+        const expected = mSales.reduce((acc, s) => acc + s.totalAmount, 0)
+        const received = mSales.reduce((acc, s) => acc + s.paidAmount, 0)
+        const openAmount = Math.max(0, expected - received)
+        const cashVendedor = mSales
+          .filter((s) => s.paymentMethod === 'dinheiro' && (s.cashDestination || 'vendedor') === 'vendedor')
+          .reduce((acc, s) => acc + s.paidAmount, 0)
+        const cashLoja = mSales
+          .filter((s) => s.paymentMethod === 'dinheiro' && s.cashDestination === 'loja')
+          .reduce((acc, s) => acc + s.paidAmount, 0)
+        const pixEntidade = mSales
+          .filter((s) => s.paymentMethod === 'pix' && s.pixDestination === 'entidade')
+          .reduce((acc, s) => acc + s.paidAmount, 0)
+        const pixVendedor = mSales
+          .filter((s) => s.paymentMethod === 'pix' && s.pixDestination === 'vendedor')
+          .reduce((acc, s) => acc + s.paidAmount, 0)
+        const settlements = memberSettlements.filter((x) => x.memberId === m.id)
+        const settledCash = settlements.filter((x) => x.kind === 'dinheiro').reduce((a, x) => a + x.amount, 0)
+        const settledPix = settlements.filter((x) => x.kind === 'pix_vendedor').reduce((a, x) => a + x.amount, 0)
+        const byStatus = {
+          quitado: mSales.filter((s) => s.status === 'quitado').length,
+          pendente: mSales.filter((s) => s.status === 'pendente').length,
+          parcial: mSales.filter((s) => s.status === 'parcial').length,
+          divergente: mSales.filter((s) => s.status === 'divergente').length,
+        }
+        const withProof = mSales.filter((s) => Boolean(proofUrlForSale(s, pixCharges))).length
+        // Prestações são globais; com filtro de evento mostramos o bruto do período
+        const cashOpen = reportEventId ? cashVendedor : Math.max(0, cashVendedor - settledCash)
+        const pixVendedorOpen = reportEventId ? pixVendedor : Math.max(0, pixVendedor - settledPix)
+        const toEntity = cashLoja + pixEntidade + (reportEventId ? 0 : settledCash + settledPix)
+        return {
+          member: m,
+          mSales,
+          settlements,
+          saleCount,
+          soldCount,
+          expected,
+          received,
+          openAmount,
+          cashVendedor,
+          cashLoja,
+          pixEntidade,
+          pixVendedor,
+          settledCash,
+          settledPix,
+          cashOpen,
+          pixVendedorOpen,
+          toEntity,
+          byStatus,
+          withProof,
+          dueTotal: cashOpen + pixVendedorOpen,
+        }
+      })
+      .sort((a, b) => b.dueTotal - a.dueTotal || b.expected - a.expected || a.member.name.localeCompare(b.member.name))
+  }, [members, sales, memberSettlements, reportEventId, pixCharges])
 
   const totals = useMemo(() => {
-    const expected = sales.reduce((a, s) => a + s.totalAmount, 0)
-    const received = sales.reduce((a, s) => a + s.paidAmount, 0)
-    const cashLoja = sales
-      .filter((s) => s.paymentMethod === 'dinheiro' && s.cashDestination === 'loja')
-      .reduce((a, s) => a + s.paidAmount, 0)
-    const cashVendedorOpen = reports.reduce((a, r) => a + r.cashOpen, 0)
-    const pixEntidade = sales
-      .filter((s) => s.paymentMethod === 'pix' && s.pixDestination === 'entidade')
-      .reduce((a, s) => a + s.paidAmount, 0)
-    const pixVendedorOpen = reports.reduce((a, r) => a + r.pixVendedorOpen, 0)
-    return { expected, received, cashLoja, cashVendedorOpen, pixEntidade, pixVendedorOpen }
-  }, [sales, reports])
+    return reports.reduce(
+      (acc, r) => ({
+        expected: acc.expected + r.expected,
+        received: acc.received + r.received,
+        cashLoja: acc.cashLoja + r.cashLoja,
+        cashVendedorOpen: acc.cashVendedorOpen + r.cashOpen,
+        pixEntidade: acc.pixEntidade + r.pixEntidade,
+        pixVendedorOpen: acc.pixVendedorOpen + r.pixVendedorOpen,
+        soldCount: acc.soldCount + r.soldCount,
+        saleCount: acc.saleCount + r.saleCount,
+        dueTotal: acc.dueTotal + r.dueTotal,
+      }),
+      {
+        expected: 0,
+        received: 0,
+        cashLoja: 0,
+        cashVendedorOpen: 0,
+        pixEntidade: 0,
+        pixVendedorOpen: 0,
+        soldCount: 0,
+        saleCount: 0,
+        dueTotal: 0,
+      },
+    )
+  }, [reports])
+
+  const selectedReport = useMemo(
+    () => reports.find((r) => r.member.id === reportMemberId) || null,
+    [reports, reportMemberId],
+  )
 
   const who = isAdmin
     ? getAuthRecord()?.organizerName || session?.memberName || 'ADM'
@@ -1369,27 +1412,45 @@ export default function LocalApp() {
           <div className="panel">
             <div className="panel-head">
               <div>
-                <h2>Relatórios analíticos</h2>
-                <p>Visão financeira, vendas com comprovante e rastro de transferências.</p>
+                <h2>Relatórios por membro</h2>
+                <p>Um membro por vez — financeiro, vendas, blocos e baixas sem misturar a equipe.</p>
               </div>
             </div>
-            <div className="report-tabs">
-              {(
-                [
-                  ['prestacao', 'Prestação / blocos'],
-                  ['vendas', 'Vendas detalhadas'],
-                  ['transferencias', 'Transferências entre membros'],
-                ] as const
-              ).map(([id, label]) => (
-                <button
-                  key={id}
-                  type="button"
-                  className={reportSection === id ? 'active' : ''}
-                  onClick={() => setReportSection(id)}
+            <div className="form-grid report-filters">
+              <label>
+                Evento
+                <select
+                  value={reportEventId}
+                  onChange={(e) => {
+                    setReportEventId(e.target.value)
+                  }}
                 >
-                  {label}
-                </button>
-              ))}
+                  <option value="">Todos os eventos</option>
+                  {raffles.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.eventName || r.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Membro
+                <select
+                  value={reportMemberId}
+                  onChange={(e) => {
+                    setReportMemberId(e.target.value)
+                    setReportDetail('resumo')
+                  }}
+                >
+                  <option value="">Ver ranking da equipe</option>
+                  {reports.map((r) => (
+                    <option key={r.member.id} value={r.member.id}>
+                      {r.member.name}
+                      {r.dueTotal > 0 ? ` · a prestar ${brl(r.dueTotal)}` : ''}
+                    </option>
+                  ))}
+                </select>
+              </label>
             </div>
             <div className="hero-metrics report-metrics">
               <article className="metric">
@@ -1401,232 +1462,501 @@ export default function LocalApp() {
                 <strong>{brl(totals.received)}</strong>
               </article>
               <article className="metric">
-                <span>Dinheiro loja</span>
-                <strong>{brl(totals.cashLoja)}</strong>
+                <span>A prestar (equipe)</span>
+                <strong>{brl(totals.dueTotal)}</strong>
               </article>
               <article className="metric">
-                <span>Dinheiro c/ vendedor</span>
-                <strong>{brl(totals.cashVendedorOpen)}</strong>
+                <span>Dinheiro loja</span>
+                <strong>{brl(totals.cashLoja)}</strong>
               </article>
               <article className="metric">
                 <span>PIX entidade</span>
                 <strong>{brl(totals.pixEntidade)}</strong>
               </article>
               <article className="metric">
-                <span>PIX vendedor aberto</span>
-                <strong>{brl(totals.pixVendedorOpen)}</strong>
+                <span>Números vendidos</span>
+                <strong>{totals.soldCount}</strong>
               </article>
             </div>
           </div>
 
-          {reportSection === 'prestacao' && (
+          {!selectedReport && (
             <div className="panel">
               <div className="panel-head">
                 <div>
-                  <h2>Prestação por membro</h2>
-                  <p>Blocos em aberto, dinheiro com o vendedor e PIX a repassar.</p>
+                  <h2>Equipe</h2>
+                  <p>Toque no membro para abrir o dossiê completo. Ordenado por valor a prestar.</p>
                 </div>
               </div>
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Membro</th>
-                      <th>Blocos</th>
-                      <th>Com aberto</th>
-                      <th>Esgotados</th>
-                      <th>Nº abertos</th>
-                      <th>Nº vendidos</th>
-                      <th>Dinheiro loja</th>
-                      <th>Dinheiro c/ ele</th>
-                      <th>PIX vendedor aberto</th>
-                      <th></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {[...reports]
-                      .sort((a, b) => memberBlockStats(b.member.id).openNumbers - memberBlockStats(a.member.id).openNumbers)
-                      .map((r) => {
-                        const bs = memberBlockStats(r.member.id)
-                        return (
-                          <tr key={r.member.id}>
-                            <td>{r.member.name}</td>
-                            <td>{bs.blocks}</td>
-                            <td>{bs.openBlocks}</td>
-                            <td>{bs.soldOutBlocks}</td>
-                            <td>{bs.openNumbers}</td>
-                            <td>{bs.soldNumbers}</td>
-                            <td>{brl(r.cashLoja)}</td>
-                            <td>{brl(r.cashOpen)}</td>
-                            <td>{brl(r.pixVendedorOpen)}</td>
-                            <td>
-                              {r.cashOpen > 0 && (
-                                <button
-                                  type="button"
-                                  className="btn btn-secondary"
-                                  onClick={() => {
-                                    addMemberSettlement({
-                                      memberId: r.member.id,
-                                      amount: r.cashOpen,
-                                      kind: 'dinheiro',
-                                      note: 'Prestação dinheiro',
-                                    })
-                                    showToast('Dinheiro quitado com a entidade.')
-                                  }}
-                                >
-                                  Receber dinheiro
-                                </button>
-                              )}
-                              {r.pixVendedorOpen > 0 && (
-                                <button
-                                  type="button"
-                                  className="btn btn-secondary"
-                                  onClick={() => {
-                                    addMemberSettlement({
-                                      memberId: r.member.id,
-                                      amount: r.pixVendedorOpen,
-                                      kind: 'pix_vendedor',
-                                      note: 'Repasse PIX vendedor',
-                                    })
-                                    showToast('PIX do vendedor prestado.')
-                                  }}
-                                >
-                                  Receber PIX vendedor
-                                </button>
-                              )}
-                            </td>
-                          </tr>
-                        )
-                      })}
-                  </tbody>
-                </table>
+              <div className="member-report-list">
+                {reports.map((r) => {
+                  const bs = memberBlockStats(r.member.id, reportEventId || undefined)
+                  return (
+                    <button
+                      key={r.member.id}
+                      type="button"
+                      className="member-report-row"
+                      onClick={() => {
+                        setReportMemberId(r.member.id)
+                        setReportDetail('resumo')
+                      }}
+                    >
+                      <div className="member-report-main">
+                        <strong>{r.member.name}</strong>
+                        <span className="hint">
+                          {r.saleCount} vendas · {r.soldCount} nº · {bs.blocks} blocos
+                          {bs.openNumbers > 0 ? ` · ${bs.openNumbers} abertos` : ''}
+                        </span>
+                      </div>
+                      <div className="member-report-kpis">
+                        <span>
+                          Esperado
+                          <strong>{brl(r.expected)}</strong>
+                        </span>
+                        <span>
+                          Recebido
+                          <strong>{brl(r.received)}</strong>
+                        </span>
+                        <span className={r.dueTotal > 0 ? 'due' : 'ok'}>
+                          A prestar
+                          <strong>{brl(r.dueTotal)}</strong>
+                        </span>
+                      </div>
+                    </button>
+                  )
+                })}
+                {reports.length === 0 && <p className="empty">Nenhum membro ativo.</p>}
               </div>
             </div>
           )}
 
-          {reportSection === 'vendas' && (
-            <div className="panel">
+          {selectedReport && (
+            <div className="panel member-dossier">
               <div className="panel-head">
                 <div>
-                  <h2>Vendas detalhadas</h2>
-                  <p>Recebimento, destino do dinheiro e comprovante anexado.</p>
+                  <button type="button" className="linkish" onClick={() => setReportMemberId('')}>
+                    ← Voltar à equipe
+                  </button>
+                  <h2>{selectedReport.member.name}</h2>
+                  <p>
+                    Dossiê individual
+                    {reportEventId
+                      ? ` · ${raffles.find((r) => r.id === reportEventId)?.eventName || 'evento'}`
+                      : ' · todos os eventos'}
+                    .
+                  </p>
+                </div>
+                <div className="btn-row wrap">
+                  {selectedReport.cashOpen > 0 && (
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      onClick={() => {
+                        addMemberSettlement({
+                          memberId: selectedReport.member.id,
+                          amount: selectedReport.cashOpen,
+                          kind: 'dinheiro',
+                          note: 'Prestação dinheiro',
+                          raffleId: reportEventId || undefined,
+                        })
+                        showToast('Dinheiro quitado com a entidade.')
+                      }}
+                    >
+                      Receber dinheiro {brl(selectedReport.cashOpen)}
+                    </button>
+                  )}
+                  {selectedReport.pixVendedorOpen > 0 && (
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={() => {
+                        addMemberSettlement({
+                          memberId: selectedReport.member.id,
+                          amount: selectedReport.pixVendedorOpen,
+                          kind: 'pix_vendedor',
+                          note: 'Repasse PIX vendedor',
+                          raffleId: reportEventId || undefined,
+                        })
+                        showToast('PIX do vendedor prestado.')
+                      }}
+                    >
+                      Receber PIX {brl(selectedReport.pixVendedorOpen)}
+                    </button>
+                  )}
                 </div>
               </div>
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Data</th>
-                      <th>Membro</th>
-                      <th>Comprador</th>
-                      <th>Números</th>
-                      <th>Valor</th>
-                      <th>Forma</th>
-                      <th>Dinheiro loja</th>
-                      <th>Status</th>
-                      <th>Comprovante</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {[...sales]
-                      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-                      .map((s) => {
-                        const proof = proofUrlForSale(s, pixCharges)
-                        const loja =
-                          s.paymentMethod === 'dinheiro' && s.cashDestination === 'loja' ? s.paidAmount : 0
-                        return (
-                          <tr key={s.id}>
-                            <td>{new Date(s.createdAt).toLocaleString('pt-BR')}</td>
-                            <td>{members.find((m) => m.id === s.memberId)?.name || '—'}</td>
-                            <td>{s.buyerName}</td>
-                            <td>{formatNumbers(s.numbers)}</td>
-                            <td>
-                              {brl(s.paidAmount)}/{brl(s.totalAmount)}
-                            </td>
-                            <td>
-                              {s.paymentMethod === 'dinheiro'
-                                ? `Dinheiro (${s.cashDestination === 'loja' ? 'loja' : 'vendedor'})`
-                                : `PIX/${s.pixDestination || '—'}`}
-                            </td>
-                            <td>{brl(loja)}</td>
-                            <td>
-                              <span className={`badge ${s.status}`}>{statusLabel[s.status]}</span>
-                            </td>
-                            <td>
-                              {proof ? (
-                                <button
-                                  type="button"
-                                  className="btn-proof"
-                                  title="Abrir comprovante"
-                                  onClick={() => openProofUrl(proof)}
-                                >
-                                  <ProofIcon />
-                                </button>
-                              ) : (
-                                '—'
-                              )}
-                            </td>
-                          </tr>
-                        )
-                      })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
 
-          {reportSection === 'transferencias' && (
-            <div className="panel">
-              <div className="panel-head">
-                <div>
-                  <h2>Transferências entre membros</h2>
-                  <p>Histórico completo de atribuições, transferências e liberações de blocos.</p>
-                </div>
+              <div className="report-tabs">
+                {(
+                  [
+                    ['resumo', 'Resumo'],
+                    ['vendas', 'Vendas'],
+                    ['blocos', 'Blocos'],
+                    ['baixas', 'Baixas / prestações'],
+                    ['movimentos', 'Movimentos de bloco'],
+                  ] as const
+                ).map(([id, label]) => (
+                  <button
+                    key={id}
+                    type="button"
+                    className={reportDetail === id ? 'active' : ''}
+                    onClick={() => setReportDetail(id)}
+                  >
+                    {label}
+                  </button>
+                ))}
               </div>
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Quando</th>
-                      <th>Tipo</th>
-                      <th>Evento</th>
-                      <th>Bloco</th>
-                      <th>De</th>
-                      <th>Para</th>
-                      <th>Obs.</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {blockTransfers.map((t) => {
-                      const block = blocks.find((b) => b.id === t.blockId)
-                      const raffle = raffles.find((r) => r.id === t.raffleId)
-                      const kindLabel =
-                        t.kind === 'assign' ? 'Atribuição' : t.kind === 'transfer' ? 'Transferência' : 'Liberação'
-                      return (
-                        <tr key={t.id}>
-                          <td>{new Date(t.createdAt).toLocaleString('pt-BR')}</td>
-                          <td>{kindLabel}</td>
-                          <td>{raffle?.eventName || '—'}</td>
-                          <td>
-                            {block?.label || '—'}
-                            {block ? ` (${block.fromNumber}–${block.toNumber})` : ''}
-                          </td>
-                          <td>{t.fromMemberId ? members.find((m) => m.id === t.fromMemberId)?.name || '—' : 'livre'}</td>
-                          <td>{t.toMemberId ? members.find((m) => m.id === t.toMemberId)?.name || '—' : 'livre'}</td>
-                          <td>{t.note || '—'}</td>
-                        </tr>
-                      )
-                    })}
-                    {blockTransfers.length === 0 && (
+
+              {reportDetail === 'resumo' && (
+                <div className="dossier-body">
+                  <div className="hero-metrics report-metrics">
+                    <article className="metric">
+                      <span>Esperado</span>
+                      <strong>{brl(selectedReport.expected)}</strong>
+                    </article>
+                    <article className="metric">
+                      <span>Recebido</span>
+                      <strong>{brl(selectedReport.received)}</strong>
+                    </article>
+                    <article className="metric">
+                      <span>Em aberto (vendas)</span>
+                      <strong>{brl(selectedReport.openAmount)}</strong>
+                    </article>
+                    <article className="metric due-metric">
+                      <span>A prestar à entidade</span>
+                      <strong>{brl(selectedReport.dueTotal)}</strong>
+                    </article>
+                  </div>
+
+                  <div className="breakdown-grid">
+                    <article>
+                      <h3>Origem do dinheiro</h3>
+                      <ul className="breakdown-list">
+                        <li>
+                          <span>Dinheiro já na loja</span>
+                          <strong>{brl(selectedReport.cashLoja)}</strong>
+                        </li>
+                        <li>
+                          <span>Dinheiro ainda com o vendedor</span>
+                          <strong>{brl(selectedReport.cashVendedor)}</strong>
+                        </li>
+                        <li>
+                          <span>Já prestado (dinheiro)</span>
+                          <strong>{brl(selectedReport.settledCash)}</strong>
+                        </li>
+                        <li className={selectedReport.cashOpen > 0 ? 'warn' : ''}>
+                          <span>Dinheiro a receber dele</span>
+                          <strong>{brl(selectedReport.cashOpen)}</strong>
+                        </li>
+                      </ul>
+                    </article>
+                    <article>
+                      <h3>PIX</h3>
+                      <ul className="breakdown-list">
+                        <li>
+                          <span>PIX direto na entidade</span>
+                          <strong>{brl(selectedReport.pixEntidade)}</strong>
+                        </li>
+                        <li>
+                          <span>PIX na conta do vendedor</span>
+                          <strong>{brl(selectedReport.pixVendedor)}</strong>
+                        </li>
+                        <li>
+                          <span>Já prestado (PIX vendedor)</span>
+                          <strong>{brl(selectedReport.settledPix)}</strong>
+                        </li>
+                        <li className={selectedReport.pixVendedorOpen > 0 ? 'warn' : ''}>
+                          <span>PIX a receber dele</span>
+                          <strong>{brl(selectedReport.pixVendedorOpen)}</strong>
+                        </li>
+                      </ul>
+                    </article>
+                    <article>
+                      <h3>Vendas</h3>
+                      <ul className="breakdown-list">
+                        <li>
+                          <span>Qtd. de vendas</span>
+                          <strong>{selectedReport.saleCount}</strong>
+                        </li>
+                        <li>
+                          <span>Números vendidos</span>
+                          <strong>{selectedReport.soldCount}</strong>
+                        </li>
+                        <li>
+                          <span>Com comprovante</span>
+                          <strong>
+                            {selectedReport.withProof}/{selectedReport.saleCount}
+                          </strong>
+                        </li>
+                        <li>
+                          <span>Já na entidade (loja+PIX+prestado)</span>
+                          <strong>{brl(selectedReport.toEntity)}</strong>
+                        </li>
+                      </ul>
+                    </article>
+                    <article>
+                      <h3>Status das vendas</h3>
+                      <ul className="breakdown-list">
+                        <li>
+                          <span>Quitado</span>
+                          <strong>{selectedReport.byStatus.quitado}</strong>
+                        </li>
+                        <li>
+                          <span>Pendente</span>
+                          <strong>{selectedReport.byStatus.pendente}</strong>
+                        </li>
+                        <li>
+                          <span>Parcial</span>
+                          <strong>{selectedReport.byStatus.parcial}</strong>
+                        </li>
+                        <li>
+                          <span>Divergente</span>
+                          <strong>{selectedReport.byStatus.divergente}</strong>
+                        </li>
+                      </ul>
+                    </article>
+                  </div>
+
+                  {(() => {
+                    const bs = memberBlockStats(selectedReport.member.id, reportEventId || undefined)
+                    return (
+                      <div className="hint dossier-hint">
+                        Blocos: {bs.blocks} · com aberto {bs.openBlocks} · esgotados {bs.soldOutBlocks} · nº
+                        abertos {bs.openNumbers} · nº vendidos nos blocos {bs.soldNumbers}
+                        {reportEventId
+                          ? ' · Prestações são globais; o filtro de evento afeta vendas e blocos.'
+                          : ''}
+                      </div>
+                    )
+                  })()}
+                </div>
+              )}
+
+              {reportDetail === 'vendas' && (
+                <div className="table-wrap">
+                  <table>
+                    <thead>
                       <tr>
-                        <td colSpan={7}>
-                          <p className="empty">Nenhuma transferência registrada.</p>
-                        </td>
+                        <th>Data</th>
+                        <th>Evento</th>
+                        <th>Comprador</th>
+                        <th>Números</th>
+                        <th>Valor</th>
+                        <th>Forma</th>
+                        <th>Status</th>
+                        <th>Comprovante</th>
                       </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
+                    </thead>
+                    <tbody>
+                      {[...selectedReport.mSales]
+                        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+                        .map((s) => {
+                          const proof = proofUrlForSale(s, pixCharges)
+                          const raffle = raffles.find((r) => r.id === s.raffleId)
+                          return (
+                            <tr key={s.id}>
+                              <td>{new Date(s.createdAt).toLocaleString('pt-BR')}</td>
+                              <td>{raffle?.eventName || raffle?.name || '—'}</td>
+                              <td>
+                                {s.buyerName}
+                                {s.buyerPhone ? <div className="hint">{s.buyerPhone}</div> : null}
+                              </td>
+                              <td>{formatNumbers(s.numbers)}</td>
+                              <td>
+                                {brl(s.paidAmount)}/{brl(s.totalAmount)}
+                              </td>
+                              <td>
+                                {s.paymentMethod === 'dinheiro'
+                                  ? `Dinheiro (${s.cashDestination === 'loja' ? 'loja' : 'vendedor'})`
+                                  : `PIX/${s.pixDestination || '—'}`}
+                              </td>
+                              <td>
+                                <span className={`badge ${s.status}`}>{statusLabel[s.status]}</span>
+                              </td>
+                              <td>
+                                {proof ? (
+                                  <button
+                                    type="button"
+                                    className="btn-proof"
+                                    title="Abrir comprovante"
+                                    onClick={() => openProofUrl(proof)}
+                                  >
+                                    <ProofIcon />
+                                  </button>
+                                ) : (
+                                  '—'
+                                )}
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      {selectedReport.mSales.length === 0 && (
+                        <tr>
+                          <td colSpan={8}>
+                            <p className="empty">Nenhuma venda deste membro no filtro.</p>
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {reportDetail === 'blocos' && (
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Evento</th>
+                        <th>Bloco</th>
+                        <th>Faixa</th>
+                        <th>Total</th>
+                        <th>Vendidos</th>
+                        <th>Abertos</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {blocks
+                        .filter(
+                          (b) =>
+                            b.memberId === selectedReport.member.id &&
+                            (!reportEventId || b.raffleId === reportEventId),
+                        )
+                        .sort((a, b) => a.index - b.index)
+                        .map((b) => {
+                          const st = blockStats(b.id)
+                          const raffle = raffles.find((r) => r.id === b.raffleId)
+                          return (
+                            <tr key={b.id}>
+                              <td>{raffle?.eventName || raffle?.name || '—'}</td>
+                              <td>{b.label}</td>
+                              <td>
+                                {b.fromNumber}–{b.toNumber}
+                              </td>
+                              <td>{st.total}</td>
+                              <td>{st.sold}</td>
+                              <td>{st.open}</td>
+                            </tr>
+                          )
+                        })}
+                      {blocks.filter(
+                        (b) =>
+                          b.memberId === selectedReport.member.id &&
+                          (!reportEventId || b.raffleId === reportEventId),
+                      ).length === 0 && (
+                        <tr>
+                          <td colSpan={6}>
+                            <p className="empty">Nenhum bloco com este membro.</p>
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {reportDetail === 'baixas' && (
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Quando</th>
+                        <th>Tipo</th>
+                        <th>Valor</th>
+                        <th>Obs.</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {selectedReport.settlements.map((x) => (
+                        <tr key={x.id}>
+                          <td>{new Date(x.createdAt).toLocaleString('pt-BR')}</td>
+                          <td>{x.kind === 'dinheiro' ? 'Dinheiro' : 'PIX vendedor'}</td>
+                          <td>{brl(x.amount)}</td>
+                          <td>{x.note || '—'}</td>
+                        </tr>
+                      ))}
+                      {selectedReport.settlements.length === 0 && (
+                        <tr>
+                          <td colSpan={4}>
+                            <p className="empty">Nenhuma prestação registrada deste membro.</p>
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {reportDetail === 'movimentos' && (
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Quando</th>
+                        <th>Tipo</th>
+                        <th>Evento</th>
+                        <th>Bloco</th>
+                        <th>De</th>
+                        <th>Para</th>
+                        <th>Obs.</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {blockTransfers
+                        .filter(
+                          (t) =>
+                            t.fromMemberId === selectedReport.member.id ||
+                            t.toMemberId === selectedReport.member.id,
+                        )
+                        .filter((t) => !reportEventId || t.raffleId === reportEventId)
+                        .map((t) => {
+                          const block = blocks.find((b) => b.id === t.blockId)
+                          const raffle = raffles.find((r) => r.id === t.raffleId)
+                          const kindLabel =
+                            t.kind === 'assign'
+                              ? 'Atribuição'
+                              : t.kind === 'transfer'
+                                ? 'Transferência'
+                                : 'Liberação'
+                          return (
+                            <tr key={t.id}>
+                              <td>{new Date(t.createdAt).toLocaleString('pt-BR')}</td>
+                              <td>{kindLabel}</td>
+                              <td>{raffle?.eventName || '—'}</td>
+                              <td>
+                                {block?.label || '—'}
+                                {block ? ` (${block.fromNumber}–${block.toNumber})` : ''}
+                              </td>
+                              <td>
+                                {t.fromMemberId
+                                  ? members.find((m) => m.id === t.fromMemberId)?.name || '—'
+                                  : 'livre'}
+                              </td>
+                              <td>
+                                {t.toMemberId
+                                  ? members.find((m) => m.id === t.toMemberId)?.name || '—'
+                                  : 'livre'}
+                              </td>
+                              <td>{t.note || '—'}</td>
+                            </tr>
+                          )
+                        })}
+                      {blockTransfers.filter(
+                        (t) =>
+                          (t.fromMemberId === selectedReport.member.id ||
+                            t.toMemberId === selectedReport.member.id) &&
+                          (!reportEventId || t.raffleId === reportEventId),
+                      ).length === 0 && (
+                        <tr>
+                          <td colSpan={7}>
+                            <p className="empty">Nenhum movimento de bloco deste membro.</p>
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
           )}
         </section>

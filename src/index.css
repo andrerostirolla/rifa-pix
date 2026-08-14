@@ -1005,6 +1005,14 @@ button.block-card {
     grid-template-columns: 1fr;
   }
 
+  .member-report-row {
+    grid-template-columns: 1fr;
+  }
+
+  .member-report-kpis {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
   .event-grid {
     grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   }

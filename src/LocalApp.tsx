@@ -17,7 +17,7 @@ import { PixChargeModal } from './PixChargeModal'
 import { SettlementConfirmModal } from './SettlementConfirmModal'
 import { adminCredentialHint, verifyAdminCredential } from './lib/adminGuard'
 import { formatErr } from './lib/errors'
-import { brl, formatNumbers, useStore } from './store'
+import { brl, formatNumbers, isPixChargeExpired, useStore } from './store'
 import { TeamChat } from './TeamChat'
 import { InstallAppButton } from './InstallAppButton'
 import type { CashDestination, PaymentMethod, PaymentStatus, PixDestination } from './types'
@@ -32,27 +32,21 @@ const statusLabel: Record<PaymentStatus, string> = {
   divergente: 'Divergente',
 }
 
-function isPixChargeExpired(charge?: { status: string; expiresAt?: string; createdAt?: string }) {
-  if (!charge) return false
-  if (charge.status === 'expired' || charge.status === 'cancelled') return true
-  if (charge.status !== 'pending') return false
-  const expMs = charge.expiresAt
-    ? new Date(charge.expiresAt).getTime()
-    : charge.createdAt
-      ? new Date(charge.createdAt).getTime() + 30 * 60 * 1000
-      : null
-  return expMs != null && expMs < Date.now()
-}
-
 function askProceed(message = 'Tem certeza que deseja prosseguir com essa operação?') {
   return window.confirm(message)
 }
 
-function isCashPending(s: { paymentMethod: string; cashDestination?: string; cashSettledAt?: string }) {
+function isCashPending(s: {
+  paymentMethod: string
+  cashDestination?: string
+  cashSettledAt?: string
+  cancelledAt?: string
+}) {
   return (
     s.paymentMethod === 'dinheiro' &&
     (s.cashDestination || 'vendedor') === 'vendedor' &&
-    !s.cashSettledAt
+    !s.cashSettledAt &&
+    !s.cancelledAt
   )
 }
 
@@ -63,10 +57,12 @@ function saleUiStatus(
     paymentMethod: string
     cashDestination?: string
     cashSettledAt?: string
+    cancelledAt?: string
   },
   charges: Array<{ saleId: string; status: string }>,
 ): 'quitado' | 'pendente' | 'falha' {
   const charge = charges.find((c) => c.saleId === s.id)
+  if (s.cancelledAt) return 'falha'
   if (s.status === 'divergente' || charge?.status === 'expired' || charge?.status === 'cancelled') return 'falha'
   if (s.paymentMethod === 'dinheiro') {
     if ((s.cashDestination || 'vendedor') === 'loja' || s.cashSettledAt) return 'quitado'
@@ -147,6 +143,7 @@ export default function LocalApp() {
     saleId?: string
     isDemo?: boolean
     expiresAt?: string
+    reopened?: boolean
   } | null>(null)
   const [checkingPix, setCheckingPix] = useState(false)
   const [pixPaid, setPixPaid] = useState(false)
@@ -155,6 +152,7 @@ export default function LocalApp() {
   const [reportEventId, setReportEventId] = useState('')
   const [reportDetail, setReportDetail] = useState<'resumo' | 'vendas' | 'blocos' | 'baixas' | 'movimentos'>('resumo')
   const pixCheckLock = useRef(false)
+  const saleFormRef = useRef<HTMLFormElement | null>(null)
 
   const raffles = useStore((s) => s.raffles)
   const members = useStore((s) => s.members)
@@ -181,6 +179,7 @@ export default function LocalApp() {
   const removeSale = useStore((s) => s.removeSale)
   const settlePixChargeByTxid = useStore((s) => s.settlePixChargeByTxid)
   const expireStalePixCharges = useStore((s) => s.expireStalePixCharges)
+  const cancelPixSale = useStore((s) => s.cancelPixSale)
   const registerPixCharge = useStore((s) => s.registerPixCharge)
   const createChargeForSale = useStore((s) => s.createChargeForSale)
   const amortize = useStore((s) => s.amortize)
@@ -214,13 +213,16 @@ export default function LocalApp() {
     return sales.filter((s) => s.memberId === memberId)
   }, [isAdmin, sales, memberId])
 
+  /** Vendas que valem dinheiro — canceladas ficam só no histórico da lista. */
+  const activeSales = useMemo(() => sales.filter((s) => !s.cancelledAt), [sales])
+
   const suggestions = useMemo(() => autoMatchSuggestions(), [sales, pixPayments, pixCharges, amortizations, autoMatchSuggestions])
 
   const reports = useMemo(() => {
     return members
       .filter((m) => m.active)
       .map((m) => {
-        const mSalesAll = sales.filter((s) => s.memberId === m.id)
+        const mSalesAll = activeSales.filter((s) => s.memberId === m.id)
         const mSales = reportEventId ? mSalesAll.filter((s) => s.raffleId === reportEventId) : mSalesAll
         const soldCount = mSales.reduce((acc, s) => acc + s.numbers.length, 0)
         const saleCount = mSales.length
@@ -300,7 +302,7 @@ export default function LocalApp() {
         }
       })
       .sort((a, b) => b.dueTotal - a.dueTotal || b.expected - a.expected || a.member.name.localeCompare(b.member.name))
-  }, [members, sales, memberSettlements, reportEventId, pixCharges, raffles])
+  }, [members, activeSales, memberSettlements, reportEventId, pixCharges, raffles])
 
   const totals = useMemo(() => {
     return reports.reduce(
@@ -375,10 +377,6 @@ export default function LocalApp() {
     if (savingSale) return
     if (isSupabaseConfigured && !cloudOk && paymentMethod === 'pix') {
       showToast('Sem nuvem — PIX bloqueado. Use dinheiro (contingência) ou reconecte.')
-      return
-    }
-    if (pixModal && !pixPaid) {
-      showToast('Finalize ou cancele o PIX em aberto antes de lançar outra venda.')
       return
     }
     const formEl = e.currentTarget
@@ -572,19 +570,82 @@ export default function LocalApp() {
     }
   }
 
+  /** Limpa a tela de venda para o próximo comprador, sem tocar no PIX em aberto. */
+  const clearSaleForm = () => {
+    saleFormRef.current?.reset()
+    setSelectedNumbers([])
+    setPaymentMethod('dinheiro')
+    setCashDestination('vendedor')
+    setPixDestination('entidade')
+    setProofDataUrl('')
+  }
+
   const cancelPendingPixSale = async () => {
     const saleId = pixModal?.saleId
     setPixModal(null)
     setPixPaid(false)
-    if (saleId) {
-      removeSale(saleId)
-      try {
-        await flushWorkspaceToCloud(useStore.getState().exportSnapshot())
-      } catch {
-        /* ignore */
-      }
-      showToast('PIX cancelado — venda não efetivada. Números liberados.')
+    if (!saleId) return
+    const result = cancelPixSale(saleId, 'membro')
+    if (!result.ok) return showToast(result.error)
+    clearSaleForm()
+    logAudit('venda.pix_cancelada', `${formatNumbers(result.numbers)} liberado(s)`)
+    try {
+      await flushWorkspaceToCloud(useStore.getState().exportSnapshot())
+    } catch {
+      /* sobe no próximo sync */
     }
+    showToast(`PIX cancelado. Números ${formatNumbers(result.numbers)} liberados.`)
+  }
+
+  /** Deixa o PIX valendo em segundo plano e libera a tela para a próxima venda. */
+  const keepPixAndStartNewSale = () => {
+    setPixModal(null)
+    setPixPaid(false)
+    clearSaleForm()
+    showToast('PIX segue em aberto. Reabra pelo status "Aguardando PIX" na lista.')
+  }
+
+  /** Reabre o mesmo QR/copia e cola de uma venda que já está aguardando. */
+  const reopenPixCharge = (saleId: string) => {
+    const sale = sales.find((s) => s.id === saleId)
+    const charge = pixCharges.find((c) => c.saleId === saleId && c.status === 'pending')
+    const copyPaste = charge?.copyPaste || charge?.qrCode || ''
+    if (!sale || !charge || !copyPaste) {
+      return showToast('O QR desta venda não está salvo neste aparelho. Cancele e gere um PIX novo.')
+    }
+    if (isPixChargeExpired(charge)) {
+      return showToast('Este QR já venceu. Cancele a venda e gere um PIX novo.')
+    }
+    setPixPaid(false)
+    setPixModal({
+      buyerName: sale.buyerName,
+      amount: sale.totalAmount,
+      copyPaste,
+      txid: charge.txid,
+      saleId: sale.id,
+      isDemo: charge.provider ? charge.provider !== 'sicoob' : true,
+      expiresAt: charge.expiresAt,
+      reopened: true,
+    })
+  }
+
+  const cancelPixFromList = async (saleId: string) => {
+    const sale = sales.find((s) => s.id === saleId)
+    if (!sale) return
+    if (!askProceed(`Cancelar o PIX de ${sale.buyerName}? Os números voltam a ficar livres.`)) return
+    const result = cancelPixSale(saleId, 'membro')
+    if (!result.ok) return showToast(result.error)
+    if (pixModal?.saleId === saleId) {
+      setPixModal(null)
+      setPixPaid(false)
+    }
+    logAudit('venda.pix_cancelada', `${sale.buyerName} · ${formatNumbers(result.numbers)}`)
+    try {
+      await flushWorkspaceToCloud(useStore.getState().exportSnapshot())
+    } catch {
+      /* sobe no próximo sync */
+    }
+    showToast(`PIX cancelado. Números ${formatNumbers(result.numbers)} liberados.`)
   }
 
   const finishPaidPixSale = () => {
@@ -687,7 +748,11 @@ export default function LocalApp() {
         txid,
       })
       if (result.status === 'paid') {
-        settlePixChargeByTxid(txid, result.amount, result.saleId || saleId)
+        const settled = settlePixChargeByTxid(txid, result.amount, result.saleId || saleId)
+        if (settled.ok && settled.reactivated) {
+          showToast('Atenção: este PIX estava cancelado e o pagamento entrou. Avise o ADM.')
+          logAudit('venda.pix_pago_apos_cancelar', txid)
+        }
         try {
           const remote = await fetchByAccessCode(cloudSession.workspace.accessCode)
           useStore.getState().importSnapshot(remote.state)
@@ -783,14 +848,16 @@ export default function LocalApp() {
     if (sale?.status === 'quitado' || charge) setPixPaid(true)
   }, [pixModal?.saleId, pixPaid, sales, pixCharges])
 
-  // Pendentes na lista: consulta automática sem botão
+  // Pendentes na lista: consulta automática sem botão (o do modal tem effect próprio)
   useEffect(() => {
-    if (isAdmin || pixModal) return
+    if (isAdmin) return
     const pending = sales.filter(
       (s) =>
         s.memberId === memberId &&
         s.paymentMethod === 'pix' &&
         s.status === 'pendente' &&
+        !s.cancelledAt &&
+        s.id !== pixModal?.saleId &&
         pixCharges.some((c) => c.saleId === s.id && c.status === 'pending' && c.txid && !isPixChargeExpired(c)),
     )
     if (!pending.length) return
@@ -804,7 +871,7 @@ export default function LocalApp() {
     const id = window.setInterval(tick, 1500)
     return () => window.clearInterval(id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAdmin, pixModal, sales, pixCharges, memberId])
+  }, [isAdmin, pixModal?.saleId, sales, pixCharges, memberId])
 
   useEffect(() => {
     if (!isAdmin || adminTab !== 'txid') return
@@ -812,16 +879,29 @@ export default function LocalApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAdmin, adminTab])
 
-  // QR vencido: libera números e some da lista (venda PIX nunca paga)
+  // QR vencido: venda vira "Cancelada" (fica no histórico riscada) e os números voltam
   useEffect(() => {
     if (isAdmin) return
     const tick = () => {
-      if (!expireStalePixCharges()) return
+      const expired = expireStalePixCharges()
+      if (!expired.length) return
+      const freed = useStore
+        .getState()
+        .sales.filter((s) => expired.includes(s.id))
+        .flatMap((s) => s.numbers)
+        .sort((a, b) => a - b)
+      setPixModal((prev) => (prev?.saleId && expired.includes(prev.saleId) ? null : prev))
+      showToast(
+        freed.length
+          ? `PIX expirou sem pagamento. Números ${formatNumbers(freed)} liberados.`
+          : 'PIX expirou sem pagamento. Venda cancelada.',
+      )
       void flushWorkspaceToCloud(useStore.getState().exportSnapshot()).catch(() => {})
     }
     tick()
-    const id = window.setInterval(tick, 30_000)
+    const id = window.setInterval(tick, 15_000)
     return () => window.clearInterval(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAdmin, expireStalePixCharges])
 
   if (!session) {
@@ -983,7 +1063,7 @@ export default function LocalApp() {
 
       {!isAdmin && (memberTab === 'vendas' || openBlock) && (
         <section className="grid-2">
-          <form className="panel" onSubmit={onCreateSale}>
+          <form className="panel" ref={saleFormRef} onSubmit={onCreateSale}>
             <div className="panel-head">
               <div>
                 <h2>{openBlock ? `Vender · ${openBlock.label}` : 'Lançar venda'}</h2>
@@ -1154,16 +1234,15 @@ export default function LocalApp() {
                 <tbody>
                   {visibleSales.map((s) => {
                     const charge = pixCharges.find((c) => c.saleId === s.id)
-                    const pixExpired = isPixChargeExpired(charge)
+                    const cancelled = Boolean(s.cancelledAt)
                     const waitingPix =
-                      s.paymentMethod === 'pix' && s.status === 'pendente' && !pixExpired
-                    const badgeLabel = waitingPix
-                      ? 'Aguardando PIX'
-                      : pixExpired
-                        ? 'PIX expirado'
-                        : statusLabel[s.status]
+                      !cancelled &&
+                      s.paymentMethod === 'pix' &&
+                      s.status === 'pendente' &&
+                      !isPixChargeExpired(charge)
+                    const canReopen = waitingPix && Boolean(charge?.copyPaste || charge?.qrCode)
                     return (
-                      <tr key={s.id}>
+                      <tr key={s.id} className={cancelled ? 'sale-cancelled' : undefined}>
                         <td>{s.buyerName}</td>
                         <td>{formatNumbers(s.numbers)}</td>
                         <td>
@@ -1183,18 +1262,47 @@ export default function LocalApp() {
                                 <br />
                                 <span className="pix-pending-hint">Aguardando pagamento…</span>
                               </>
-                            ) : pixExpired ? (
+                            ) : cancelled ? (
                               <>
                                 <br />
-                                <span className="pix-pending-hint">QR expirou — números liberados</span>
+                                <span className="pix-pending-hint">
+                                  {s.cancelReason === 'expirado'
+                                    ? 'QR venceu sem pagamento — números liberados'
+                                    : 'Cancelado pelo vendedor — números liberados'}
+                                </span>
                               </>
                             ) : null}
                           </div>
                         </td>
                         <td>
-                          <span className={`badge ${waitingPix || pixExpired ? 'falha' : s.status}`}>
-                            {badgeLabel}
-                          </span>
+                          {waitingPix ? (
+                            <div className="sale-status-actions">
+                              <button
+                                type="button"
+                                className="badge badge-action falha"
+                                onClick={() => (canReopen ? reopenPixCharge(s.id) : undefined)}
+                                disabled={!canReopen}
+                                title={
+                                  canReopen
+                                    ? 'Abrir de novo o QR e o copia e cola desta venda'
+                                    : 'QR não disponível neste aparelho'
+                                }
+                              >
+                                Aguardando PIX
+                              </button>
+                              <button
+                                type="button"
+                                className="btn btn-ghost btn-mini"
+                                onClick={() => void cancelPixFromList(s.id)}
+                              >
+                                Cancelar
+                              </button>
+                            </div>
+                          ) : (
+                            <span className={`badge ${cancelled ? 'falha' : s.status}`}>
+                              {cancelled ? 'Cancelada' : statusLabel[s.status]}
+                            </span>
+                          )}
                         </td>
                       </tr>
                     )
@@ -1248,15 +1356,15 @@ export default function LocalApp() {
             </article>
             <article className="metric">
               <span>Vendas</span>
-              <strong>{sales.length}</strong>
+              <strong>{activeSales.length}</strong>
             </article>
             <article className="metric">
               <span>Esperado</span>
-              <strong>{brl(sales.reduce((a, s) => a + s.totalAmount, 0))}</strong>
+              <strong>{brl(activeSales.reduce((a, s) => a + s.totalAmount, 0))}</strong>
             </article>
             <article className="metric">
               <span>Recebido</span>
-              <strong>{brl(sales.reduce((a, s) => a + s.paidAmount, 0))}</strong>
+              <strong>{brl(activeSales.reduce((a, s) => a + s.paidAmount, 0))}</strong>
             </article>
           </div>
           {isSupabaseConfigured && loadCloudSession()?.workspace.accessCode ? (
@@ -1984,7 +2092,7 @@ export default function LocalApp() {
               </thead>
               <tbody>
                 {sales.map((s) => (
-                  <tr key={s.id}>
+                  <tr key={s.id} className={s.cancelledAt ? 'sale-cancelled' : undefined}>
                     <td>{members.find((m) => m.id === s.memberId)?.name || '—'}</td>
                     <td>{s.buyerName}</td>
                     <td>{formatNumbers(s.numbers)}</td>
@@ -1997,7 +2105,9 @@ export default function LocalApp() {
                       </div>
                     </td>
                     <td>
-                      <span className={`badge ${s.status}`}>{statusLabel[s.status]}</span>
+                      <span className={`badge ${s.cancelledAt ? 'falha' : s.status}`}>
+                        {s.cancelledAt ? 'Cancelada' : statusLabel[s.status]}
+                      </span>
                     </td>
                     <td>
                       {proofUrlForSale(s, pixCharges) ? (
@@ -2795,8 +2905,10 @@ export default function LocalApp() {
           checking={checkingPix}
           paid={pixPaid}
           expiresAt={pixModal.expiresAt}
+          reopened={pixModal.reopened}
           onCancel={() => void cancelPendingPixSale()}
           onClosePaid={finishPaidPixSale}
+          onNewSale={isAdmin ? undefined : keepPixAndStartNewSale}
         />
       )}
       {baixaConfirmOpen && (

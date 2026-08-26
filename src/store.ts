@@ -36,6 +36,38 @@ function overlaps(aFrom: number, aTo: number, bFrom: number, bTo: number) {
   return aFrom <= bTo && bFrom <= aTo
 }
 
+/** Validade padrão quando o provedor não devolve expiração. */
+export const PIX_FALLBACK_TTL_MS = 30 * 60 * 1000
+
+/** Momento (ms) em que o QR perde a validade, ou null se não houver como saber. */
+export function pixChargeExpiryMs(charge: {
+  expiresAt?: string
+  createdAt?: string
+}): number | null {
+  if (charge.expiresAt) {
+    const ms = new Date(charge.expiresAt).getTime()
+    if (Number.isFinite(ms)) return ms
+  }
+  if (charge.createdAt) {
+    const ms = new Date(charge.createdAt).getTime()
+    if (Number.isFinite(ms)) return ms + PIX_FALLBACK_TTL_MS
+  }
+  return null
+}
+
+/** QR ainda aceita pagamento? */
+export function isPixChargeExpired(charge?: {
+  status: string
+  expiresAt?: string
+  createdAt?: string
+}) {
+  if (!charge) return false
+  if (charge.status === 'expired' || charge.status === 'cancelled') return true
+  if (charge.status !== 'pending') return false
+  const expMs = pixChargeExpiryMs(charge)
+  return expMs != null && expMs < Date.now()
+}
+
 type Store = AppState & {
   addRaffle: (input: {
     name: string
@@ -133,9 +165,14 @@ type Store = AppState & {
     txid: string,
     amount?: number,
     saleId?: string,
-  ) => { ok: true; saleId: string } | { ok: false; error: string }
-  /** PIX pendente com QR vencido: libera números (remove venda não paga). */
-  expireStalePixCharges: () => boolean
+  ) => { ok: true; saleId: string; reactivated: boolean } | { ok: false; error: string }
+  /** PIX pendente com QR vencido: cancela a venda e libera os números. */
+  expireStalePixCharges: () => string[]
+  /** Cancela um PIX em aberto mantendo o histórico e liberando os números. */
+  cancelPixSale: (
+    saleId: string,
+    reason: 'expirado' | 'membro',
+  ) => { ok: true; numbers: number[] } | { ok: false; error: string }
   attachTxidToSale: (
     saleId: string,
     txid: string,
@@ -439,7 +476,8 @@ export const useStore = create<Store>()(
 
       soldNumbers: (raffleId) => {
         const set = new Set<number>()
-        for (const sale of get().sales.filter((s) => s.raffleId === raffleId)) {
+        // Venda cancelada não ocupa número: volta para o bloco do membro
+        for (const sale of get().sales.filter((s) => s.raffleId === raffleId && !s.cancelledAt)) {
           sale.numbers.forEach((n) => set.add(n))
         }
         return set
@@ -723,44 +761,69 @@ export const useStore = create<Store>()(
         const paidAmount = Math.min(sale.totalAmount, Math.max(sale.paidAmount, add))
         const status = saleStatus(sale.totalAmount, paidAmount)
         const paidAt = new Date().toISOString()
+        // Pagamento que cai depois do cancelamento reativa a venda: o dinheiro entrou de fato
+        const reactivated = Boolean(sale.cancelledAt)
         set((s) => ({
-          sales: s.sales.map((x) => (x.id === sid ? { ...x, paidAmount, status } : x)),
+          sales: s.sales.map((x) =>
+            x.id === sid
+              ? { ...x, paidAmount, status, cancelledAt: undefined, cancelReason: undefined }
+              : x,
+          ),
           pixCharges: s.pixCharges.map((c) =>
-            c.txid.toLowerCase() === clean.toLowerCase() || (c.saleId === sid && c.status === 'pending')
+            c.txid.toLowerCase() === clean.toLowerCase() ||
+            (c.saleId === sid && (c.status === 'pending' || c.status === 'expired' || c.status === 'cancelled'))
               ? { ...c, status: 'paid' as const, paidAt }
               : c,
           ),
         }))
-        return { ok: true, saleId: sid }
+        return { ok: true, saleId: sid, reactivated }
       },
 
       expireStalePixCharges: () => {
         const now = Date.now()
-        const PIX_TTL_MS = 30 * 60 * 1000
-        let changed = false
+        const expiredSaleIds: string[] = []
         set((s) => {
-          const dropSaleIds = new Set<string>()
+          const hitSaleIds = new Set<string>()
           const pixCharges = s.pixCharges.map((c) => {
             if (c.status !== 'pending') return c
-            const expMs = c.expiresAt
-              ? new Date(c.expiresAt).getTime()
-              : c.createdAt
-                ? new Date(c.createdAt).getTime() + PIX_TTL_MS
-                : null
-            if (!expMs || expMs >= now) return c
-            changed = true
-            if (c.saleId) dropSaleIds.add(c.saleId)
+            const expMs = pixChargeExpiryMs(c)
+            if (expMs == null || expMs >= now) return c
+            const sale = s.sales.find((x) => x.id === c.saleId)
+            // Pago não expira, mesmo que o QR tenha vencido depois
+            if (sale?.status === 'quitado' || sale?.cancelledAt) return { ...c, status: 'expired' as const }
+            if (c.saleId) hitSaleIds.add(c.saleId)
             return { ...c, status: 'expired' as const }
           })
-          if (!changed) return s
-          const sales = s.sales.filter((sale) => {
-            if (!dropSaleIds.has(sale.id)) return true
-            if (sale.status === 'quitado') return true
-            return false
+          if (!hitSaleIds.size) return s
+          const at = new Date().toISOString()
+          const sales = s.sales.map((sale) => {
+            if (!hitSaleIds.has(sale.id) || sale.cancelledAt || sale.status === 'quitado') return sale
+            expiredSaleIds.push(sale.id)
+            return { ...sale, cancelledAt: at, cancelReason: 'expirado' as const }
           })
+          if (!expiredSaleIds.length) return { pixCharges }
           return { pixCharges, sales }
         })
-        return changed
+        return expiredSaleIds
+      },
+
+      cancelPixSale: (saleId, reason) => {
+        const sale = get().sales.find((s) => s.id === saleId)
+        if (!sale) return { ok: false, error: 'Venda não encontrada.' }
+        if (sale.cancelledAt) return { ok: false, error: 'Esta venda já está cancelada.' }
+        if (sale.status === 'quitado') return { ok: false, error: 'Venda já paga — não pode ser cancelada.' }
+        const at = new Date().toISOString()
+        set((s) => ({
+          sales: s.sales.map((x) =>
+            x.id === saleId ? { ...x, cancelledAt: at, cancelReason: reason, paidAmount: 0 } : x,
+          ),
+          pixCharges: s.pixCharges.map((c) =>
+            c.saleId === saleId && c.status === 'pending'
+              ? { ...c, status: reason === 'expirado' ? ('expired' as const) : ('cancelled' as const) }
+              : c,
+          ),
+        }))
+        return { ok: true, numbers: [...sale.numbers] }
       },
 
       attachTxidToSale: (saleId, txid, amount, proofImageDataUrl) => {

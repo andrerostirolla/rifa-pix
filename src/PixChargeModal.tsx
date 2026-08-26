@@ -11,8 +11,12 @@ type Props = {
   checking?: boolean
   paid?: boolean
   expiresAt?: string
+  /** Reabertura de um PIX que já estava na lista */
+  reopened?: boolean
   onCancel: () => void
   onClosePaid: () => void
+  /** Deixa o PIX em aberto e libera a tela para a próxima venda */
+  onNewSale?: () => void
 }
 
 function formatRemain(ms: number) {
@@ -20,6 +24,10 @@ function formatRemain(ms: number) {
   const m = Math.floor(ms / 60000)
   const s = Math.floor((ms % 60000) / 1000)
   return `${m}min ${String(s).padStart(2, '0')}s`
+}
+
+function totalMinutes(ms: number) {
+  return Math.max(1, Math.round(ms / 60000))
 }
 
 export function PixChargeModal({
@@ -31,8 +39,10 @@ export function PixChargeModal({
   checking,
   paid,
   expiresAt,
+  reopened,
   onCancel,
   onClosePaid,
+  onNewSale,
 }: Props) {
   const [copied, setCopied] = useState(false)
   const [now, setNow] = useState(() => Date.now())
@@ -98,26 +108,41 @@ export function PixChargeModal({
         </div>
 
         <p className="pix-wait-banner">
-          A venda <strong>só é efetivada</strong> quando o pagamento cair na conta da loja.
-          <br />
-          Pode demorar alguns minutos — a consulta é automática a cada segundo. Não feche esta tela.
+          A venda <strong>só é efetivada</strong> quando o pagamento cair na conta da loja. A consulta é
+          automática a cada segundo.
           {remainMs != null ? (
             <>
               <br />
-              Tempo do QR: <strong>{formatRemain(remainMs)}</strong> (em geral até ~30 minutos).
+              Este PIX fica em aberto por <strong>{totalMinutes(remainMs)} minuto(s)</strong> — vence às{' '}
+              <strong>{new Date(expiresAt!).toLocaleTimeString('pt-BR')}</strong>. Faltam{' '}
+              <strong>{formatRemain(remainMs)}</strong>.
               {remainMs <= 0 ? (
                 <>
                   <br />
-                  <strong>QR expirado.</strong> Cancele a venda e gere um PIX novo se o comprador ainda for pagar.
+                  <strong>QR expirado.</strong> A venda foi cancelada e os números voltaram para você.
                 </>
-              ) : null}
+              ) : (
+                <>
+                  <br />
+                  Se ninguém pagar até lá, a venda é <strong>cancelada sozinha</strong> e os números voltam a
+                  ficar livres.
+                </>
+              )}
             </>
           ) : (
             <>
               <br />
-              O QR costuma valer cerca de <strong>30 minutos</strong> — pode esperar sem pressa.
+              O QR costuma valer cerca de <strong>30 minutos</strong>. Depois disso a venda é cancelada e os
+              números voltam a ficar livres.
             </>
           )}
+          {onNewSale ? (
+            <>
+              <br />
+              Pode fechar esta tela em <strong>Nova venda</strong>: o PIX continua valendo e você reabre este
+              QR pelo status <strong>Aguardando PIX</strong> na lista.
+            </>
+          ) : null}
         </p>
 
         {isDemo ? (
@@ -141,6 +166,11 @@ export function PixChargeModal({
           <button type="button" className="btn btn-primary" onClick={copyPix}>
             {copied ? 'Copiado!' : 'Copiar PIX'}
           </button>
+          {onNewSale ? (
+            <button type="button" className="btn btn-secondary" onClick={onNewSale}>
+              {reopened ? 'Fechar' : 'Nova venda'}
+            </button>
+          ) : null}
         </div>
 
         <p className="hint pix-waiting">

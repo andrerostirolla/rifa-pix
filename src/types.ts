@@ -81,6 +81,9 @@ export interface Sale {
   /** Prestação de contas em dinheiro liquidada com a entidade */
   cashSettledAt?: string
   cashSettlementNote?: string
+  /** PIX cancelado (QR venceu ou o membro cancelou): números voltam a ficar livres */
+  cancelledAt?: string
+  cancelReason?: 'expirado' | 'membro'
 }
 
 /** Rastro de atribuição / transferência / liberação de bloco */

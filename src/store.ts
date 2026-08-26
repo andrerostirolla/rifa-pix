@@ -48,6 +48,28 @@ function mergeAudit(remote: AuditEntry[] = [], local: AuditEntry[] = []): AuditE
   return [...byId.values()].sort((a, b) => String(b.at).localeCompare(String(a.at))).slice(0, AUDIT_MAX)
 }
 
+/** Texto único do cancelamento, usado na lista do membro, em Vendas e na tela TXID. */
+export function cancelInfo(sale?: Sale | null, charge?: PixCharge | null) {
+  if (!sale?.cancelledAt) return null
+  const byMember = sale.cancelReason === 'membro'
+  const minutes = (() => {
+    if (!charge?.expiresAt || !charge.createdAt) return null
+    const mins = Math.round(
+      (new Date(charge.expiresAt).getTime() - new Date(charge.createdAt).getTime()) / 60000,
+    )
+    return Number.isFinite(mins) && mins > 0 ? mins : null
+  })()
+  return {
+    byMember,
+    label: byMember ? 'Cancelado por membro' : 'Cancelado por tempo',
+    at: sale.cancelledAt,
+    who: byMember ? sale.cancelledBy || null : null,
+    reason: byMember
+      ? sale.cancelNote?.trim() || 'O vendedor cancelou sem informar o motivo.'
+      : `Tempo limite do PIX venceu sem pagamento${minutes ? ` (QR de ${minutes} min)` : ''}. Os números voltaram a ficar livres.`,
+  }
+}
+
 /** Validade padrão quando o provedor não devolve expiração. */
 export const PIX_FALLBACK_TTL_MS = 30 * 60 * 1000
 
@@ -184,6 +206,7 @@ type Store = AppState & {
   cancelPixSale: (
     saleId: string,
     reason: 'expirado' | 'membro',
+    info?: { note?: string; by?: string },
   ) => { ok: true; numbers: number[] } | { ok: false; error: string }
   attachTxidToSale: (
     saleId: string,
@@ -778,7 +801,15 @@ export const useStore = create<Store>()(
         set((s) => ({
           sales: s.sales.map((x) =>
             x.id === sid
-              ? { ...x, paidAmount, status, cancelledAt: undefined, cancelReason: undefined }
+              ? {
+                  ...x,
+                  paidAmount,
+                  status,
+                  cancelledAt: undefined,
+                  cancelReason: undefined,
+                  cancelNote: undefined,
+                  cancelledBy: undefined,
+                }
               : x,
           ),
           pixCharges: s.pixCharges.map((c) =>
@@ -819,7 +850,7 @@ export const useStore = create<Store>()(
         return expiredSaleIds
       },
 
-      cancelPixSale: (saleId, reason) => {
+      cancelPixSale: (saleId, reason, info) => {
         const sale = get().sales.find((s) => s.id === saleId)
         if (!sale) return { ok: false, error: 'Venda não encontrada.' }
         if (sale.cancelledAt) return { ok: false, error: 'Esta venda já está cancelada.' }
@@ -827,7 +858,16 @@ export const useStore = create<Store>()(
         const at = new Date().toISOString()
         set((s) => ({
           sales: s.sales.map((x) =>
-            x.id === saleId ? { ...x, cancelledAt: at, cancelReason: reason, paidAmount: 0 } : x,
+            x.id === saleId
+              ? {
+                  ...x,
+                  cancelledAt: at,
+                  cancelReason: reason,
+                  cancelNote: info?.note?.trim() || undefined,
+                  cancelledBy: info?.by?.trim() || undefined,
+                  paidAmount: 0,
+                }
+              : x,
           ),
           pixCharges: s.pixCharges.map((c) =>
             c.saleId === saleId && c.status === 'pending'

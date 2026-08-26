@@ -16,9 +16,11 @@ import { useCloudSync } from './lib/cloudSyncContext'
 import { PixChargeModal } from './PixChargeModal'
 import { SettlementConfirmModal } from './SettlementConfirmModal'
 import { AdminConfirmModal } from './AdminConfirmModal'
+import { CancelReasonModal } from './CancelReasonModal'
+import { InfoPopover } from './InfoPopover'
 import { adminCredentialHint, verifyAdminCredential } from './lib/adminGuard'
 import { formatErr } from './lib/errors'
-import { brl, formatNumbers, isPixChargeExpired, useStore } from './store'
+import { brl, cancelInfo, formatNumbers, isPixChargeExpired, useStore } from './store'
 import { TeamChat } from './TeamChat'
 import { InstallAppButton } from './InstallAppButton'
 import type { CashDestination, PaymentMethod, PaymentStatus, PixDestination } from './types'
@@ -55,7 +57,8 @@ const auditActionLabel: Record<string, string> = {
   'venda.dinheiro': 'Venda em dinheiro',
   'venda.pix': 'Venda PIX recebida',
   'venda.contingencia': 'Venda em contingência',
-  'venda.pix_cancelada': 'Cancelou PIX',
+  'venda.pix_cancelada': 'Cancelou PIX (membro)',
+  'venda.pix_expirada': 'PIX cancelado por tempo',
   'venda.pix_pago_apos_cancelar': 'PIX pago após cancelamento',
   'dinheiro.liquidar': 'Baixou prestação em dinheiro',
   'dados.limpar': 'Limpou os dados',
@@ -175,6 +178,8 @@ export default function LocalApp() {
   const [wipeBusy, setWipeBusy] = useState(false)
   const [wipeError, setWipeError] = useState<string | null>(null)
   const [auditQuery, setAuditQuery] = useState('')
+  const [cancelAsk, setCancelAsk] = useState<{ saleId: string; fromModal: boolean } | null>(null)
+  const [cancelBusy, setCancelBusy] = useState(false)
   const [fullAccess, setFullAccess] = useState(false)
   const [openBlockId, setOpenBlockId] = useState<string | null>(null)
   const [openEventId, setOpenEventId] = useState<string | null>(null)
@@ -626,21 +631,41 @@ export default function LocalApp() {
     setProofDataUrl('')
   }
 
-  const cancelPendingPixSale = async () => {
-    const saleId = pixModal?.saleId
-    setPixModal(null)
-    setPixPaid(false)
-    if (!saleId) return
-    const result = cancelPixSale(saleId, 'membro')
-    if (!result.ok) return showToast(result.error)
-    clearSaleForm()
-    logAudit('venda.pix_cancelada', `${formatNumbers(result.numbers)} liberado(s)`)
+  /** Pede o motivo antes de cancelar — o texto fica na venda e na auditoria. */
+  const askCancelReason = (saleId: string, fromModal: boolean) => {
+    setCancelAsk({ saleId, fromModal })
+  }
+
+  const confirmCancelPix = async (reason: string) => {
+    const ask = cancelAsk
+    if (!ask) return
+    setCancelBusy(true)
     try {
-      await flushWorkspaceToCloud(useStore.getState().exportSnapshot())
-    } catch {
-      /* sobe no próximo sync */
+      const sale = sales.find((s) => s.id === ask.saleId)
+      const result = cancelPixSale(ask.saleId, 'membro', { note: reason, by: who })
+      if (!result.ok) {
+        setCancelAsk(null)
+        return showToast(result.error)
+      }
+      if (ask.fromModal || pixModal?.saleId === ask.saleId) {
+        setPixModal(null)
+        setPixPaid(false)
+        clearSaleForm()
+      }
+      setCancelAsk(null)
+      logAudit(
+        'venda.pix_cancelada',
+        `${sale?.buyerName || 'comprador'} · nº ${formatNumbers(result.numbers)} · motivo: ${reason}`,
+      )
+      try {
+        await flushWorkspaceToCloud(useStore.getState().exportSnapshot())
+      } catch {
+        /* sobe no próximo sync */
+      }
+      showToast(`PIX cancelado. Números ${formatNumbers(result.numbers)} liberados.`)
+    } finally {
+      setCancelBusy(false)
     }
-    showToast(`PIX cancelado. Números ${formatNumbers(result.numbers)} liberados.`)
   }
 
   /** Deixa o PIX valendo em segundo plano e libera a tela para a próxima venda. */
@@ -673,25 +698,6 @@ export default function LocalApp() {
       expiresAt: charge.expiresAt,
       reopened: true,
     })
-  }
-
-  const cancelPixFromList = async (saleId: string) => {
-    const sale = sales.find((s) => s.id === saleId)
-    if (!sale) return
-    if (!askProceed(`Cancelar o PIX de ${sale.buyerName}? Os números voltam a ficar livres.`)) return
-    const result = cancelPixSale(saleId, 'membro')
-    if (!result.ok) return showToast(result.error)
-    if (pixModal?.saleId === saleId) {
-      setPixModal(null)
-      setPixPaid(false)
-    }
-    logAudit('venda.pix_cancelada', `${sale.buyerName} · ${formatNumbers(result.numbers)}`)
-    try {
-      await flushWorkspaceToCloud(useStore.getState().exportSnapshot())
-    } catch {
-      /* sobe no próximo sync */
-    }
-    showToast(`PIX cancelado. Números ${formatNumbers(result.numbers)} liberados.`)
   }
 
   const finishPaidPixSale = () => {
@@ -966,6 +972,10 @@ export default function LocalApp() {
         .flatMap((s) => s.numbers)
         .sort((a, b) => a - b)
       setPixModal((prev) => (prev?.saleId && expired.includes(prev.saleId) ? null : prev))
+      logAudit(
+        'venda.pix_expirada',
+        `${expired.length} venda(s) cancelada(s) por tempo${freed.length ? ` · nº ${formatNumbers(freed)} liberado(s)` : ''}`,
+      )
       showToast(
         freed.length
           ? `PIX expirou sem pagamento. Números ${formatNumbers(freed)} liberados.`
@@ -1338,15 +1348,6 @@ export default function LocalApp() {
                                 <br />
                                 <span className="pix-pending-hint">Aguardando pagamento…</span>
                               </>
-                            ) : cancelled ? (
-                              <>
-                                <br />
-                                <span className="pix-pending-hint">
-                                  {s.cancelReason === 'expirado'
-                                    ? 'QR venceu sem pagamento — números liberados'
-                                    : 'Cancelado pelo vendedor — números liberados'}
-                                </span>
-                              </>
                             ) : null}
                           </div>
                         </td>
@@ -1369,15 +1370,26 @@ export default function LocalApp() {
                               <button
                                 type="button"
                                 className="btn btn-ghost btn-mini"
-                                onClick={() => void cancelPixFromList(s.id)}
+                                onClick={() => askCancelReason(s.id, false)}
                               >
                                 Cancelar
                               </button>
                             </div>
+                          ) : cancelled ? (
+                            <div className="sale-status-actions">
+                              <span className="badge falha">{cancelInfo(s, charge)?.label}</span>
+                              <InfoPopover
+                                label="Ver motivo"
+                                title={cancelInfo(s, charge)?.label || 'Cancelamento'}
+                                tone="falha"
+                                lines={[
+                                  cancelInfo(s, charge)?.reason,
+                                  `Em ${new Date(s.cancelledAt as string).toLocaleString('pt-BR')}`,
+                                ]}
+                              />
+                            </div>
                           ) : (
-                            <span className={`badge ${cancelled ? 'falha' : s.status}`}>
-                              {cancelled ? 'Cancelada' : statusLabel[s.status]}
-                            </span>
+                            <span className={`badge ${s.status}`}>{statusLabel[s.status]}</span>
                           )}
                         </td>
                       </tr>
@@ -2200,7 +2212,10 @@ export default function LocalApp() {
                 </tr>
               </thead>
               <tbody>
-                {sales.map((s) => (
+                {sales.map((s) => {
+                  const rowCharge = pixCharges.find((c) => c.saleId === s.id)
+                  const cancel = cancelInfo(s, rowCharge)
+                  return (
                   <tr key={s.id} className={s.cancelledAt ? 'sale-cancelled' : undefined}>
                     <td>{members.find((m) => m.id === s.memberId)?.name || '—'}</td>
                     <td>{s.buyerName}</td>
@@ -2214,13 +2229,27 @@ export default function LocalApp() {
                       </div>
                     </td>
                     <td>
-                      <span className={`badge ${s.cancelledAt ? 'falha' : s.status}`}>
-                        {s.cancelledAt ? 'Cancelada' : statusLabel[s.status]}
-                      </span>
+                      {cancel ? (
+                        <div className="sale-status-actions">
+                          <span className="badge falha">{cancel.label}</span>
+                          <InfoPopover
+                            label="Ver motivo"
+                            title={cancel.label}
+                            tone="falha"
+                            lines={[
+                              cancel.reason,
+                              cancel.who ? `Cancelado por: ${cancel.who}` : null,
+                              `Em ${new Date(cancel.at).toLocaleString('pt-BR')}`,
+                            ]}
+                          />
+                        </div>
+                      ) : (
+                        <span className={`badge ${s.status}`}>{statusLabel[s.status]}</span>
+                      )}
                     </td>
                     <td>
                       {(() => {
-                        const charge = pixCharges.find((c) => c.saleId === s.id)
+                        const charge = rowCharge
                         const proofUrl = proofUrlForSale(s, pixCharges)
                         return (
                           <div className="proof-cell">
@@ -2240,13 +2269,15 @@ export default function LocalApp() {
                                 <span>TXID</span>
                                 <code className="proof-txid">{charge.txid}</code>
                                 <span className="hint">
-                                  {charge.status === 'paid'
-                                    ? `Pago${charge.paidAt ? ` em ${new Date(charge.paidAt).toLocaleString('pt-BR')}` : ''}`
-                                    : charge.status === 'pending'
-                                      ? 'Aguardando Sicoob'
-                                      : charge.status === 'expired'
-                                        ? 'QR expirado'
-                                        : 'Cancelado'}
+                                  {cancel
+                                    ? cancel.label
+                                    : charge.status === 'paid'
+                                      ? `Pago${charge.paidAt ? ` em ${new Date(charge.paidAt).toLocaleString('pt-BR')}` : ''}`
+                                      : charge.status === 'pending'
+                                        ? 'Aguardando Sicoob'
+                                        : charge.status === 'expired'
+                                          ? 'QR expirado'
+                                          : 'Cancelado'}
                                 </span>
                               </>
                             ) : (
@@ -2267,7 +2298,8 @@ export default function LocalApp() {
                       })()}
                     </td>
                   </tr>
-                ))}
+                  )
+                })}
               </tbody>
             </table>
           </div>
@@ -2313,18 +2345,15 @@ export default function LocalApp() {
                   .map((c) => {
                     const sale = sales.find((s) => s.id === c.saleId)
                     const member = members.find((m) => m.id === (sale?.memberId || ''))
+                    const cancel = cancelInfo(sale, c)
+                    const failed =
+                      Boolean(cancel) ||
+                      c.status === 'expired' ||
+                      c.status === 'cancelled' ||
+                      sale?.status === 'divergente' ||
+                      sale?.status === 'parcial'
                     return (
-                      <tr
-                        key={c.id}
-                        className={
-                          c.status === 'expired' ||
-                          c.status === 'cancelled' ||
-                          sale?.status === 'divergente' ||
-                          sale?.status === 'parcial'
-                            ? 'txid-falha'
-                            : undefined
-                        }
-                      >
+                      <tr key={c.id} className={failed ? 'txid-falha' : undefined}>
                         <td>{c.createdAt ? new Date(c.createdAt).toLocaleString('pt-BR') : '—'}</td>
                         <td>{member?.name || '—'}</td>
                         <td>
@@ -2339,27 +2368,30 @@ export default function LocalApp() {
                         <td>{brl(c.amount)}</td>
                         <td>
                           <span
-                            className={`badge ${
-                              c.status === 'expired' ||
-                              c.status === 'cancelled' ||
-                              sale?.status === 'divergente' ||
-                              sale?.status === 'parcial'
+                            className={`badge ${failed ? 'falha' : c.status === 'paid' ? 'quitado' : 'pendente'}`}
+                          >
+                            {cancel
+                              ? cancel.label
+                              : failed
                                 ? 'falha'
                                 : c.status === 'paid'
-                                  ? 'quitado'
-                                  : 'pendente'
-                            }`}
-                          >
-                            {c.status === 'expired' ||
-                            c.status === 'cancelled' ||
-                            sale?.status === 'divergente' ||
-                            sale?.status === 'parcial'
-                              ? 'falha'
-                              : c.status === 'paid'
-                                ? 'pago'
-                                : c.status}
+                                  ? 'pago'
+                                  : c.status}
                           </span>
-                          {sale ? (
+                          {cancel ? (
+                            <div className="txid-cancel">
+                              <InfoPopover
+                                label="Ver motivo"
+                                title={cancel.label}
+                                tone="falha"
+                                lines={[
+                                  cancel.reason,
+                                  cancel.who ? `Cancelado por: ${cancel.who}` : null,
+                                  `Em ${new Date(cancel.at).toLocaleString('pt-BR')}`,
+                                ]}
+                              />
+                            </div>
+                          ) : sale ? (
                             <div className="hint">venda: {statusLabel[sale.status]}</div>
                           ) : null}
                         </td>
@@ -3171,11 +3203,32 @@ export default function LocalApp() {
           paid={pixPaid}
           expiresAt={pixModal.expiresAt}
           reopened={pixModal.reopened}
-          onCancel={() => void cancelPendingPixSale()}
+          onCancel={() => {
+            if (!pixModal.saleId) {
+              setPixModal(null)
+              setPixPaid(false)
+              return
+            }
+            askCancelReason(pixModal.saleId, true)
+          }}
           onClosePaid={finishPaidPixSale}
           onNewSale={isAdmin ? undefined : keepPixAndStartNewSale}
         />
       )}
+      {cancelAsk && (() => {
+        const sale = sales.find((s) => s.id === cancelAsk.saleId)
+        if (!sale) return null
+        return (
+          <CancelReasonModal
+            buyerName={sale.buyerName}
+            numbers={formatNumbers(sale.numbers)}
+            amount={brl(sale.totalAmount)}
+            busy={cancelBusy}
+            onCancel={() => setCancelAsk(null)}
+            onConfirm={(reason) => void confirmCancelPix(reason)}
+          />
+        )
+      })()}
       {baixaConfirmOpen && (
         <SettlementConfirmModal
           memberName={members.find((m) => m.id === baixaMemberId)?.name || 'membro'}

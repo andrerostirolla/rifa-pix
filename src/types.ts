@@ -84,6 +84,10 @@ export interface Sale {
   /** PIX cancelado (QR venceu ou o membro cancelou): números voltam a ficar livres */
   cancelledAt?: string
   cancelReason?: 'expirado' | 'membro'
+  /** Motivo escrito pelo membro ao cancelar */
+  cancelNote?: string
+  /** Quem cancelou (membro ou ADM que estava logado) */
+  cancelledBy?: string
 }
 
 /** Rastro de atribuição / transferência / liberação de bloco */

@@ -5,11 +5,34 @@ const anon = (import.meta.env.VITE_SUPABASE_ANON_KEY || import.meta.env.VITE_SUP
   | string
   | undefined
 
+/** Detecta JWT service_role (nunca pode ir no browser / VITE_*). */
+function looksLikeServiceRoleKey(key: string) {
+  try {
+    const part = key.split('.')[1]
+    if (!part) return false
+    const json = atob(part.replace(/-/g, '+').replace(/_/g, '/'))
+    const payload = JSON.parse(json) as { role?: string }
+    return payload.role === 'service_role'
+  } catch {
+    return /service_role/i.test(key)
+  }
+}
+
+export const supabaseConfigError: string | null = (() => {
+  if (!url || !anon || url.includes('YOUR_')) return null
+  if (looksLikeServiceRoleKey(anon)) {
+    return (
+      'Chave errada no site: foi colocada a service_role (secreta). ' +
+      'No GitHub → Settings → Secrets → Actions, use só a anon public do Supabase em VITE_SUPABASE_ANON_KEY e rode o Deploy de novo.'
+    )
+  }
+  return null
+})()
+
 export const isSupabaseConfigured = Boolean(url && anon && !url.includes('YOUR_'))
 
-export const supabase: SupabaseClient | null = isSupabaseConfigured
-  ? createClient(url!, anon!)
-  : null
+export const supabase: SupabaseClient | null =
+  isSupabaseConfigured && !supabaseConfigError ? createClient(url!, anon!) : null
 
 export type DbRaffle = {
   id: string

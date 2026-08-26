@@ -9,7 +9,7 @@ import {
   loginMemberSession,
   setupPassword,
 } from './auth'
-import { isSupabaseConfigured, supabase } from './lib/supabase'
+import { isSupabaseConfigured, supabase, supabaseConfigError } from './lib/supabase'
 import { useAuth } from './lib/useAuth'
 import {
   biometricsSupported,
@@ -109,10 +109,27 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
     }
     return localStorage.getItem(WORKSPACE_CODE_KEY) || bio?.workspaceCode || ''
   })
+  const [teamCodeDraft, setTeamCodeDraft] = useState('')
+  const [needTeamLink, setNeedTeamLink] = useState(() => !localStorage.getItem(WORKSPACE_CODE_KEY) && !bio?.workspaceCode)
   const [cloudMembers, setCloudMembers] = useState<Array<{ id: string; name: string }>>([])
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(supabaseConfigError)
   const [busy, setBusy] = useState(false)
   const [info, setInfo] = useState<string | null>(null)
+
+  const parseTeamInput = (raw: string) => {
+    const text = raw.trim()
+    if (!text) return ''
+    try {
+      if (text.includes('http') || text.includes('equipe=')) {
+        const url = new URL(text.startsWith('http') ? text : `https://x.local/${text}`)
+        const fromQ = (url.searchParams.get('equipe') || url.searchParams.get('code') || '').trim()
+        if (fromQ) return fromQ.toUpperCase()
+      }
+    } catch {
+      /* ignore */
+    }
+    return text.replace(/[^a-zA-Z0-9]/g, '').toUpperCase()
+  }
 
   const selectedMemberName = useMemo(() => {
     const list = isSupabaseConfigured ? cloudMembers : members.filter((m) => m.active).map((m) => ({ id: m.id, name: m.name }))
@@ -132,6 +149,7 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
     setCloudMembers(peek.members || [])
     localStorage.setItem(WORKSPACE_CODE_KEY, code.trim().toUpperCase())
     setWorkspaceCode(code.trim().toUpperCase())
+    setNeedTeamLink(false)
     setInfo(`Equipe pronta · ${peek.members?.length || 0} membros`)
     return peek
   }
@@ -139,6 +157,7 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
   // Com código já salvo (ou ?equipe= no link), busca membros sozinho
   useEffect(() => {
     if (!isSupabaseConfigured || cloudRole !== 'member') return
+    if (supabaseConfigError) return
     const code = workspaceCode.trim()
     if (!code || cloudMembers.length) return
     let alive = true
@@ -148,10 +167,18 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
         if (!alive) return
         setCloudMembers(peek.members || [])
         localStorage.setItem(WORKSPACE_CODE_KEY, code.toUpperCase())
+        setNeedTeamLink(false)
+        setError(null)
       } catch (err) {
-        if (alive) {
-          setError(err instanceof Error ? err.message : 'Link/equipe inválidos. Peça o link ao ADM.')
-        }
+        if (!alive) return
+        localStorage.removeItem(WORKSPACE_CODE_KEY)
+        setWorkspaceCode('')
+        setNeedTeamLink(true)
+        setError(
+          err instanceof Error
+            ? `${err.message} — cole o link novo do ADM abaixo.`
+            : 'Equipe inválida. Cole o link do ADM abaixo.',
+        )
       }
     })()
     return () => {
@@ -380,7 +407,9 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
               : 'Entrar'}
         </h1>
         <p className="hint">
-          {isSupabaseConfigured
+          {supabaseConfigError
+            ? 'Corrija a chave anon no GitHub Secrets para o login na nuvem funcionar.'
+            : isSupabaseConfigured
             ? cloudRole === 'member'
               ? 'Entre com seu nome/PIN. Pode salvar no chaveiro e usar Face ID neste aparelho.'
               : 'ADM usa e-mail e senha (salve no chaveiro do celular para Face ID preencher).'
@@ -388,6 +417,8 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
               ? 'Primeiro acesso: defina a senha do administrador.'
               : 'ADM vê tudo. Membro vê só seus blocos e vendas.'}
         </p>
+
+        {supabaseConfigError ? <p className="auth-error">{supabaseConfigError}</p> : null}
 
         {isSupabaseConfigured && (
           <div className="role-switch">
@@ -475,14 +506,58 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
               </button>
             )}
 
-            {!workspaceCode.trim() ? (
-              <p className="hint">
-                Peça ao ADM o <strong>link de acesso</strong> da equipe (no Painel). Abra esse link neste celular uma
-                vez — depois o login fica só com nome e PIN.
-              </p>
+            {needTeamLink || !workspaceCode.trim() ? (
+              <>
+                <label>
+                  Link ou código da equipe (do ADM)
+                  <input
+                    value={teamCodeDraft}
+                    onChange={(e) => setTeamCodeDraft(e.target.value)}
+                    placeholder="Cole o link …?equipe=XXXX ou só o código"
+                    autoComplete="off"
+                  />
+                </label>
+                <div className="btn-row">
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    disabled={busy || !teamCodeDraft.trim() || Boolean(supabaseConfigError)}
+                    onClick={async () => {
+                      setError(null)
+                      setBusy(true)
+                      try {
+                        const code = parseTeamInput(teamCodeDraft)
+                        if (!code) throw new Error('Cole o link completo ou o código.')
+                        await loadCloudMemberList(code)
+                      } catch (err) {
+                        setError(err instanceof Error ? err.message : 'Link/equipe inválidos')
+                        setNeedTeamLink(true)
+                      } finally {
+                        setBusy(false)
+                      }
+                    }}
+                  >
+                    Confirmar equipe
+                  </button>
+                </div>
+              </>
             ) : cloudMembers.length === 0 && !error ? (
               <p className="hint">Carregando membros da equipe…</p>
-            ) : null}
+            ) : (
+              <p className="hint">
+                Equipe ok neste aparelho.{' '}
+                <button
+                  type="button"
+                  className="linkish"
+                  onClick={() => {
+                    setNeedTeamLink(true)
+                    setCloudMembers([])
+                  }}
+                >
+                  Trocar equipe
+                </button>
+              </p>
+            )}
 
             <label>
               Membro
@@ -491,7 +566,7 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
                 required
                 value={memberId}
                 onChange={(e) => setMemberId(e.target.value)}
-                disabled={!workspaceCode.trim()}
+                disabled={!workspaceCode.trim() || !cloudMembers.length}
               >
                 <option value="" disabled>
                   Selecione

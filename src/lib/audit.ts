@@ -6,9 +6,13 @@ import type { AuditEntry } from '../types'
 
 function actorNameNow() {
   const session = getSession()
-  if (session?.memberName) return session.memberName
+  if (session?.role === 'member') return session.memberName || 'Membro'
+  // ADM: o memberName da sessão pode ser o nome da equipe — prefere o nome da pessoa
   const auth = getAuthRecord()
   if (auth?.organizerName) return auth.organizerName
+  const cloud = loadCloudSession()
+  const wsName = cloud?.workspace.name
+  if (session?.memberName && session.memberName !== wsName) return session.memberName
   return 'ADM'
 }
 

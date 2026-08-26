@@ -327,7 +327,16 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
                 saveCloudSession(next)
               }
             }
-            await loginAdminSession(meta.name || 'ADM')
+            // Nome da pessoa, não da equipe: é o que aparece no rastro de ações
+            let admName = ''
+            try {
+              const { data } = (await supabase?.auth.getUser()) || { data: { user: null } }
+              const meta2 = data.user?.user_metadata as { organizer_name?: string } | undefined
+              admName = meta2?.organizer_name?.trim() || data.user?.email?.split('@')[0] || ''
+            } catch {
+              /* segue com o nome da equipe */
+            }
+            await loginAdminSession(admName || meta.name || 'ADM')
           } else if (mode === 'member' && session.role === 'member') {
             const opened = await fetchByAccessCode(session.workspace.accessCode)
             const next: CloudSession = {

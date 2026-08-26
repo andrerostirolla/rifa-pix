@@ -15,6 +15,7 @@ import { createWorkspaceAdmin, logAudit } from './lib/audit'
 import { useCloudSync } from './lib/cloudSyncContext'
 import { PixChargeModal } from './PixChargeModal'
 import { SettlementConfirmModal } from './SettlementConfirmModal'
+import { AdminConfirmModal } from './AdminConfirmModal'
 import { adminCredentialHint, verifyAdminCredential } from './lib/adminGuard'
 import { formatErr } from './lib/errors'
 import { brl, formatNumbers, isPixChargeExpired, useStore } from './store'
@@ -22,7 +23,16 @@ import { TeamChat } from './TeamChat'
 import { InstallAppButton } from './InstallAppButton'
 import type { CashDestination, PaymentMethod, PaymentStatus, PixDestination } from './types'
 
-type AdminTab = 'painel' | 'equipe' | 'transferencias' | 'eventos' | 'vendas' | 'txid' | 'amortizacao' | 'relatorios'
+type AdminTab =
+  | 'painel'
+  | 'equipe'
+  | 'transferencias'
+  | 'eventos'
+  | 'vendas'
+  | 'txid'
+  | 'amortizacao'
+  | 'relatorios'
+  | 'auditoria'
 type MemberTab = 'blocos' | 'vendas'
 
 const statusLabel: Record<PaymentStatus, string> = {
@@ -30,6 +40,38 @@ const statusLabel: Record<PaymentStatus, string> = {
   parcial: 'Parcial',
   quitado: 'Quitado',
   divergente: 'Divergente',
+}
+
+const auditActionLabel: Record<string, string> = {
+  'membro.criar': 'Salvou membro',
+  'membro.remover': 'Removeu membro',
+  'membro.acesso_total': 'Deu acesso total (ADM)',
+  'bloco.atribuir': 'Atribuiu bloco',
+  'bloco.transferir': 'Transferiu bloco',
+  'bloco.liberar': 'Liberou bloco',
+  'evento.criar': 'Criou evento com blocos',
+  'evento.remover': 'Removeu evento',
+  'venda.registrar': 'Registrou venda',
+  'venda.dinheiro': 'Venda em dinheiro',
+  'venda.pix': 'Venda PIX recebida',
+  'venda.contingencia': 'Venda em contingência',
+  'venda.pix_cancelada': 'Cancelou PIX',
+  'venda.pix_pago_apos_cancelar': 'PIX pago após cancelamento',
+  'dinheiro.liquidar': 'Baixou prestação em dinheiro',
+  'dados.limpar': 'Limpou os dados',
+  'dados.demo': 'Carregou demo',
+}
+
+function downloadCsv(filename: string, rows: string[][]) {
+  const escape = (v: string) => `"${String(v).replace(/"/g, '""')}"`
+  const csv = rows.map((r) => r.map(escape).join(';')).join('\r\n')
+  const blob = new Blob([`\ufeff${csv}`], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
 }
 
 function askProceed(message = 'Tem certeza que deseja prosseguir com essa operação?') {
@@ -129,6 +171,10 @@ export default function LocalApp() {
   const [settlingBaixa, setSettlingBaixa] = useState(false)
   const [baixaConfirmOpen, setBaixaConfirmOpen] = useState(false)
   const [baixaConfirmError, setBaixaConfirmError] = useState<string | null>(null)
+  const [wipeOpen, setWipeOpen] = useState(false)
+  const [wipeBusy, setWipeBusy] = useState(false)
+  const [wipeError, setWipeError] = useState<string | null>(null)
+  const [auditQuery, setAuditQuery] = useState('')
   const [fullAccess, setFullAccess] = useState(false)
   const [openBlockId, setOpenBlockId] = useState<string | null>(null)
   const [openEventId, setOpenEventId] = useState<string | null>(null)
@@ -723,6 +769,35 @@ export default function LocalApp() {
     }
   }
 
+  const confirmWipeAll = async (adminPassword: string) => {
+    setWipeBusy(true)
+    setWipeError(null)
+    try {
+      try {
+        await verifyAdminCredential(adminPassword)
+      } catch (err) {
+        setWipeError(formatErr(err, 'Senha do ADM inválida.'))
+        return
+      }
+      const before = {
+        membros: members.length,
+        eventos: raffles.length,
+        vendas: sales.length,
+      }
+      resetAll()
+      // Roda depois do reset: o rastro sobrevive à limpeza
+      logAudit(
+        'dados.limpar',
+        `Apagou ${before.eventos} evento(s), ${before.membros} membro(s) e ${before.vendas} venda(s)`,
+      )
+      setWipeOpen(false)
+      requestCloudPush()
+      showToast('Dados limpos. O rastro de ações foi preservado.')
+    } finally {
+      setWipeBusy(false)
+    }
+  }
+
   const verifyPixPayment = async (txid: string, saleId?: string, opts?: { silent?: boolean }) => {
     const silent = Boolean(opts?.silent)
     const cloudSession = loadCloudSession()
@@ -940,6 +1015,7 @@ export default function LocalApp() {
                       ['txid', 'TXID', 'TXID'],
                       ['amortizacao', 'Baixas', 'Baixas'],
                       ['relatorios', 'Relatórios', 'Relat.'],
+                      ['auditoria', 'Auditoria', 'Audit.'],
                     ] as const
                   ).map(([id, full, short]) => (
                     <button
@@ -1329,6 +1405,7 @@ export default function LocalApp() {
                 onClick={() => {
                   if (!askProceed()) return
                   seedDemo()
+                  logAudit('dados.demo', 'Carregou dados de demonstração')
                   requestCloudPush()
                   showToast('Demo: 4 blocos×50. Carlos PIN 1234 (blocos 1–2), Fernanda PIN 5678 (3–4).')
                 }}
@@ -1339,10 +1416,8 @@ export default function LocalApp() {
                 type="button"
                 className="btn btn-danger"
                 onClick={() => {
-                  if (!askProceed('Tem certeza que deseja limpar todos os dados?')) return
-                  resetAll()
-                  requestCloudPush()
-                  showToast('Dados limpos.')
+                  setWipeError(null)
+                  setWipeOpen(true)
                 }}
               >
                 Limpar
@@ -1424,7 +1499,13 @@ export default function LocalApp() {
             )
           })}
           <h3>Rastro de ações</h3>
-          <p className="hint">Quem fez o quê — útil com vários ADMs na mesma equipe.</p>
+          <p className="hint">
+            Últimas 10 ações. Histórico completo, busca e exportação na aba{' '}
+            <button type="button" className="btn-link" onClick={() => setAdminTab('auditoria')}>
+              Auditoria
+            </button>
+            .
+          </p>
           <div className="table-wrap">
             <table>
               <thead>
@@ -1443,13 +1524,11 @@ export default function LocalApp() {
                     </td>
                   </tr>
                 )}
-                {(auditLog || []).slice(0, 40).map((a) => (
+                {(auditLog || []).slice(0, 10).map((a) => (
                   <tr key={a.id}>
                     <td>{new Date(a.at).toLocaleString('pt-BR')}</td>
                     <td>{a.actorName}</td>
-                    <td>
-                      <code>{a.action}</code>
-                    </td>
+                    <td>{auditActionLabel[a.action] || a.action}</td>
                     <td>{a.detail || '—'}</td>
                   </tr>
                 ))}
@@ -1583,9 +1662,16 @@ export default function LocalApp() {
                 if (!result.ok) return showToast(result.error || 'Erro')
                 ok += 1
               }
+              const assignedLabels = blocks
+                .filter((b) => assignBlockIds.includes(b.id))
+                .map((b) => b.label)
+                .join(', ')
               setAssignBlockIds([])
               e.currentTarget.reset()
-              logAudit('bloco.atribuir', `${ok} bloco(s) → membro`)
+              logAudit(
+                'bloco.atribuir',
+                `${assignedLabels || `${ok} bloco(s)`} → ${members.find((m) => m.id === memberIdSel)?.name || 'membro'}`,
+              )
               showToast(ok === 1 ? 'Bloco atribuído ao membro.' : `${ok} blocos atribuídos ao membro.`)
               requestCloudPush()
             }}
@@ -1725,6 +1811,7 @@ export default function LocalApp() {
                                 onClick={() => {
                                   if (!askProceed()) return
                                   unassignBlock(b.id)
+                                  logAudit('bloco.liberar', `${b.label} · de ${m.name}`)
                                   requestCloudPush()
                                 }}
                               >
@@ -1740,6 +1827,7 @@ export default function LocalApp() {
                       onClick={() => {
                         if (!askProceed('Tem certeza que deseja remover este membro?')) return
                         removeMember(m.id)
+                        logAudit('membro.remover', m.name)
                         requestCloudPush()
                       }}
                     >
@@ -1769,10 +1857,17 @@ export default function LocalApp() {
                 if (!result.ok) return showToast(result.error || 'Erro')
                 ok += 1
               }
+              const movedLabels = blocks
+                .filter((b) => transferBlockIds.includes(b.id))
+                .map((b) => `${b.label} (de ${members.find((m) => m.id === b.memberId)?.name || 'livre'})`)
+                .join(', ')
               setTransferBlockIds([])
               e.currentTarget.reset()
               showToast(ok === 1 ? 'Transferência registrada.' : `${ok} transferências registradas.`)
-              logAudit('bloco.transferir', `${ok} bloco(s)`)
+              logAudit(
+                'bloco.transferir',
+                `${movedLabels || `${ok} bloco(s)`} → ${members.find((m) => m.id === toMember)?.name || 'membro'}`,
+              )
               requestCloudPush()
             }}
           >
@@ -1933,6 +2028,10 @@ export default function LocalApp() {
                   if (!result.ok) return showToast(result.error)
                   e.currentTarget.reset()
                   showToast(`Evento criado com ${result.raffle.blockCount} blocos.`)
+                  logAudit(
+                    'evento.criar',
+                    `${result.raffle.eventName} · ${result.raffle.blockCount} bloco(s) × ${result.raffle.numbersPerBlock} nº · ${brl(result.raffle.ticketPrice)}/nº`,
+                  )
                   requestCloudPush()
                 }}
               >
@@ -2017,7 +2116,17 @@ export default function LocalApp() {
                         ← Voltar aos eventos
                       </button>
                     </div>
-                    <button type="button" className="btn btn-danger" onClick={() => { removeRaffle(r.id); setOpenEventId(null); requestCloudPush() }}>
+                    <button
+                      type="button"
+                      className="btn btn-danger"
+                      onClick={() => {
+                        if (!askProceed('Remover este evento e todos os blocos dele?')) return
+                        removeRaffle(r.id)
+                        logAudit('evento.remover', r.eventName)
+                        setOpenEventId(null)
+                        requestCloudPush()
+                      }}
+                    >
                       Remover evento
                     </button>
                   </div>
@@ -2110,18 +2219,52 @@ export default function LocalApp() {
                       </span>
                     </td>
                     <td>
-                      {proofUrlForSale(s, pixCharges) ? (
-                        <button
-                          type="button"
-                          className="btn-proof"
-                          title="Abrir comprovante"
-                          onClick={() => openProofUrl(proofUrlForSale(s, pixCharges))}
-                        >
-                          <ProofIcon />
-                        </button>
-                      ) : (
-                        '—'
-                      )}
+                      {(() => {
+                        const charge = pixCharges.find((c) => c.saleId === s.id)
+                        const proofUrl = proofUrlForSale(s, pixCharges)
+                        return (
+                          <div className="proof-cell">
+                            {s.paymentMethod === 'dinheiro' ? (
+                              <>
+                                <span>Dinheiro</span>
+                                <span className="hint">
+                                  {s.cashSettledAt
+                                    ? `Prestado em ${new Date(s.cashSettledAt).toLocaleDateString('pt-BR')}`
+                                    : s.cashDestination === 'loja'
+                                      ? 'Entregue na loja'
+                                      : 'Com o vendedor'}
+                                </span>
+                              </>
+                            ) : charge?.txid ? (
+                              <>
+                                <span>TXID</span>
+                                <code className="proof-txid">{charge.txid}</code>
+                                <span className="hint">
+                                  {charge.status === 'paid'
+                                    ? `Pago${charge.paidAt ? ` em ${new Date(charge.paidAt).toLocaleString('pt-BR')}` : ''}`
+                                    : charge.status === 'pending'
+                                      ? 'Aguardando Sicoob'
+                                      : charge.status === 'expired'
+                                        ? 'QR expirado'
+                                        : 'Cancelado'}
+                                </span>
+                              </>
+                            ) : (
+                              <span className="hint">PIX sem TXID</span>
+                            )}
+                            {proofUrl ? (
+                              <button
+                                type="button"
+                                className="btn-proof"
+                                title="Abrir comprovante"
+                                onClick={() => openProofUrl(proofUrl)}
+                              >
+                                <ProofIcon />
+                              </button>
+                            ) : null}
+                          </div>
+                        )
+                      })()}
                     </td>
                   </tr>
                 ))}
@@ -2893,6 +3036,128 @@ export default function LocalApp() {
             </div>
           )}
         </section>
+      )}
+
+      {isAdmin && adminTab === 'auditoria' && (
+        <section className="panel">
+          <div className="panel-head">
+            <div>
+              <h2>Auditoria — rastro de ações</h2>
+              <p>
+                Registro de tudo que a equipe faz no sistema. <strong>Não pode ser apagado</strong>, nem pelo
+                botão Limpar do painel.
+              </p>
+            </div>
+            <div className="btn-row" style={{ marginTop: 0 }}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={!(auditLog || []).length}
+                onClick={() => {
+                  downloadCsv(`rifapix-auditoria-${new Date().toISOString().slice(0, 10)}.csv`, [
+                    ['Quando', 'Quem', 'Ação', 'Código', 'Detalhe'],
+                    ...(auditLog || []).map((a) => [
+                      new Date(a.at).toLocaleString('pt-BR'),
+                      a.actorName,
+                      auditActionLabel[a.action] || a.action,
+                      a.action,
+                      a.detail || '',
+                    ]),
+                  ])
+                  showToast('CSV da auditoria exportado.')
+                }}
+              >
+                Exportar CSV
+              </button>
+            </div>
+          </div>
+
+          <div className="form-grid report-filters">
+            <label className="full">
+              Buscar (quem, ação ou detalhe)
+              <input
+                value={auditQuery}
+                onChange={(e) => setAuditQuery(e.target.value)}
+                placeholder="Ex.: Heitor, bloco, limpar…"
+              />
+            </label>
+          </div>
+
+          {(() => {
+            const q = auditQuery.trim().toLowerCase()
+            const rows = (auditLog || []).filter((a) => {
+              if (!q) return true
+              const label = auditActionLabel[a.action] || a.action
+              return [a.actorName, a.action, label, a.detail || '']
+                .join(' ')
+                .toLowerCase()
+                .includes(q)
+            })
+            return (
+              <>
+                <p className="hint">
+                  {rows.length} de {(auditLog || []).length} registro(s).
+                </p>
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Quando</th>
+                        <th>Quem</th>
+                        <th>Ação</th>
+                        <th>Detalhe</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows.length === 0 && (
+                        <tr>
+                          <td colSpan={4}>
+                            <p className="empty">
+                              {(auditLog || []).length
+                                ? 'Nenhum registro para esta busca.'
+                                : 'Nenhuma ação registrada ainda.'}
+                            </p>
+                          </td>
+                        </tr>
+                      )}
+                      {rows.map((a) => (
+                        <tr key={a.id}>
+                          <td>{new Date(a.at).toLocaleString('pt-BR')}</td>
+                          <td>{a.actorName}</td>
+                          <td>
+                            {auditActionLabel[a.action] || a.action}
+                            <div className="hint">
+                              <code>{a.action}</code>
+                            </div>
+                          </td>
+                          <td>{a.detail || '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )
+          })()}
+        </section>
+      )}
+
+      {wipeOpen && (
+        <AdminConfirmModal
+          title="Limpar todos os dados"
+          description="Apaga eventos, blocos, membros, vendas e cobranças PIX deste sistema."
+          warning={`Isso remove ${raffles.length} evento(s), ${members.length} membro(s) e ${sales.length} venda(s). Não tem como desfazer. O rastro de ações é preservado na aba Auditoria.`}
+          confirmLabel="Limpar tudo"
+          adminHint={adminCredentialHint()}
+          busy={wipeBusy}
+          error={wipeError}
+          danger
+          onCancel={() => {
+            setWipeOpen(false)
+            setWipeError(null)
+          }}
+          onConfirm={(pwd) => void confirmWipeAll(pwd)}
+        />
       )}
 
       {pixModal && (

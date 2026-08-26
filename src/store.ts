@@ -36,6 +36,18 @@ function overlaps(aFrom: number, aTo: number, bFrom: number, bTo: number) {
   return aFrom <= bTo && bFrom <= aTo
 }
 
+/** Teto do rastro de ações. Alto de propósito: o log não deve ser podado no dia a dia. */
+const AUDIT_MAX = 5000
+
+/** Une rastros de ações sem perder entrada de nenhum aparelho. */
+function mergeAudit(remote: AuditEntry[] = [], local: AuditEntry[] = []): AuditEntry[] {
+  const byId = new Map<string, AuditEntry>()
+  for (const e of [...remote, ...local]) {
+    if (e?.id) byId.set(e.id, e)
+  }
+  return [...byId.values()].sort((a, b) => String(b.at).localeCompare(String(a.at))).slice(0, AUDIT_MAX)
+}
+
 /** Validade padrão quando o provedor não devolve expiração. */
 export const PIX_FALLBACK_TTL_MS = 30 * 60 * 1000
 
@@ -996,7 +1008,7 @@ export const useStore = create<Store>()(
 
       pushAudit: (entry) =>
         set((s) => ({
-          auditLog: [entry, ...(s.auditLog || [])].slice(0, 300),
+          auditLog: [entry, ...(s.auditLog || [])].slice(0, AUDIT_MAX),
         })),
 
       exportSnapshot: () => {
@@ -1031,7 +1043,8 @@ export const useStore = create<Store>()(
           pixCharges: data.pixCharges || [],
           memberSettlements: data.memberSettlements || [],
           blockTransfers: data.blockTransfers || [],
-          auditLog: data.auditLog || [],
+          // Nunca substitui o rastro: mescla para não perder ação de outro aparelho
+          auditLog: mergeAudit(data.auditLog, get().auditLog),
         })
         return { ok: true }
       },
@@ -1138,7 +1151,8 @@ export const useStore = create<Store>()(
         })
       },
 
-      resetAll: () => set({ ...empty }),
+      // O rastro de ações nunca é apagado, nem ao limpar os dados
+      resetAll: () => set((s) => ({ ...empty, auditLog: s.auditLog || [] })),
     }),
     {
       name: PERSIST_KEY,

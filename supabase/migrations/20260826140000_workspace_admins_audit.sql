@@ -89,17 +89,17 @@ set search_path = public
 as $$
 declare
   uid uuid := auth.uid();
-  row public.workspaces;
+  ws public.workspaces;
   code text;
   attempts int := 0;
-  display_name text;
+  v_display_name text;
 begin
   if uid is null then
     raise exception 'Não autenticado';
   end if;
 
   -- Já é colaborador de alguma equipe?
-  select w.* into row
+  select w.* into ws
   from public.workspace_admins a
   join public.workspaces w on w.id = a.workspace_id
   where a.user_id = uid
@@ -107,22 +107,26 @@ begin
   limit 1;
 
   if found then
-    return row;
+    return ws;
   end if;
 
   -- Dono
-  select * into row from public.workspaces where owner_id = uid;
+  select * into ws from public.workspaces where owner_id = uid;
   if found then
-    -- garante linha owner em workspace_admins
-    display_name := coalesce(
-      nullif(trim(p_name), ''),
-      (select display_name from public.workspace_admins where workspace_id = row.id and user_id = uid limit 1),
-      'ADM'
-    );
+    select a.display_name
+      into v_display_name
+      from public.workspace_admins a
+     where a.workspace_id = ws.id
+       and a.user_id = uid
+     limit 1;
+
+    v_display_name := coalesce(nullif(trim(p_name), ''), nullif(trim(v_display_name), ''), 'ADM');
+
     insert into public.workspace_admins (workspace_id, user_id, display_name, role, created_by)
-    values (row.id, uid, display_name, 'owner', uid)
+    values (ws.id, uid, v_display_name, 'owner', uid)
     on conflict (workspace_id, user_id) do nothing;
-    return row;
+
+    return ws;
   end if;
 
   loop
@@ -130,12 +134,12 @@ begin
     begin
       insert into public.workspaces (owner_id, name, access_code, state)
       values (uid, coalesce(nullif(trim(p_name), ''), 'RifaPIX'), code, '{}'::jsonb)
-      returning * into row;
+      returning * into ws;
 
       insert into public.workspace_admins (workspace_id, user_id, display_name, role, created_by)
-      values (row.id, uid, coalesce(nullif(trim(p_name), ''), 'ADM'), 'owner', uid);
+      values (ws.id, uid, coalesce(nullif(trim(p_name), ''), 'ADM'), 'owner', uid);
 
-      return row;
+      return ws;
     exception when unique_violation then
       attempts := attempts + 1;
       if attempts > 8 then

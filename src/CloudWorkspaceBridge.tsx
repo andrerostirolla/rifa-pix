@@ -260,7 +260,10 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
         const session = loadCloudSession()
         sessionRef.current = session
         if (!session) {
-          onError('Sessão nuvem ausente. Entre de novo.')
+          if (alive) {
+            setBoot(false)
+            onError('Sessão nuvem ausente. Entre de novo.')
+          }
           return
         }
 
@@ -332,7 +335,11 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
           onReady()
         }
       } catch (err) {
-        if (alive) onError(translateAuthErr(formatErr(err, 'Falha ao abrir workspace')))
+        if (alive) {
+          setBoot(false)
+          setSyncStatus('offline')
+          onError(translateAuthErr(formatErr(err, 'Falha ao abrir workspace')))
+        }
       }
     })()
     return () => {

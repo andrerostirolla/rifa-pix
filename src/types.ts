@@ -158,6 +158,8 @@ export interface AuditEntry {
   actorName: string
   action: string
   detail?: string
+  /** Campos extras mostrados no popover de detalhes (rótulo → valor) */
+  meta?: Record<string, string>
 }
 
 export interface AppState {

@@ -16,13 +16,18 @@ function actorNameNow() {
   return 'ADM'
 }
 
-export function logAudit(action: string, detail?: string) {
+export function logAudit(action: string, detail?: string, meta?: Record<string, string | undefined>) {
+  const cleanMeta = Object.fromEntries(
+    Object.entries(meta || {}).filter(([, v]) => Boolean(v && String(v).trim())),
+  ) as Record<string, string>
+
   const entry: AuditEntry = {
     id: crypto.randomUUID(),
     at: new Date().toISOString(),
     actorName: actorNameNow(),
     action,
     detail: detail?.trim() || undefined,
+    meta: Object.keys(cleanMeta).length ? cleanMeta : undefined,
   }
   useStore.getState().pushAudit(entry)
 
@@ -32,7 +37,7 @@ export function logAudit(action: string, detail?: string) {
       p_workspace_id: cloud.workspace.id,
       p_actor_name: entry.actorName,
       p_action: entry.action,
-      p_detail: detail ? { text: detail } : {},
+      p_detail: { ...(detail ? { text: detail } : {}), ...cleanMeta },
     }).then(({ error }) => {
       if (error) console.warn('Audit cloud:', error.message)
     })

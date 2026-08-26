@@ -23,7 +23,7 @@ import { formatErr } from './lib/errors'
 import { brl, cancelInfo, formatNumbers, isPixChargeExpired, useStore } from './store'
 import { TeamChat } from './TeamChat'
 import { InstallAppButton } from './InstallAppButton'
-import type { CashDestination, PaymentMethod, PaymentStatus, PixDestination } from './types'
+import type { AuditEntry, CashDestination, PaymentMethod, PaymentStatus, PixDestination } from './types'
 
 type AdminTab =
   | 'painel'
@@ -75,6 +75,13 @@ function downloadCsv(filename: string, rows: string[][]) {
   a.download = filename
   a.click()
   URL.revokeObjectURL(url)
+}
+
+/** Linhas do popover de auditoria: usa os campos gravados e cai no texto simples se não houver. */
+function auditPopoverLines(entry: AuditEntry) {
+  const metaLines = Object.entries(entry.meta || {}).map(([k, v]) => `${k}: ${v}`)
+  if (metaLines.length) return metaLines
+  return [entry.detail || 'Sem detalhes gravados nesta ação.']
 }
 
 function askProceed(message = 'Tem certeza que deseja prosseguir com essa operação?') {
@@ -268,6 +275,115 @@ export default function LocalApp() {
   const activeSales = useMemo(() => sales.filter((s) => !s.cancelledAt), [sales])
 
   const suggestions = useMemo(() => autoMatchSuggestions(), [sales, pixPayments, pixCharges, amortizations, autoMatchSuggestions])
+
+  /** Números do painel: caixa, ritmo de venda, destaques de membro e comprador. */
+  const resumo = useMemo(() => {
+    const now = new Date()
+    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+    const startOfWeek = startOfDay - 6 * 86_400_000
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).getTime()
+    const when = (s: (typeof activeSales)[number]) => new Date(s.createdAt).getTime()
+    const value = (list: typeof activeSales) => list.reduce((a, s) => a + s.totalAmount, 0)
+    const qty = (list: typeof activeSales) => list.reduce((a, s) => a + s.numbers.length, 0)
+    const period = (from: number) => activeSales.filter((s) => when(s) >= from)
+
+    const hoje = period(startOfDay)
+    const semana = period(startOfWeek)
+    const mes = period(startOfMonth)
+
+    let emConta = 0
+    let comVendedores = 0
+    let pixAberto = 0
+    for (const s of activeSales) {
+      const naLoja = s.paymentMethod === 'pix' && s.pixDestination === 'entidade'
+      if (naLoja) {
+        emConta += s.paidAmount
+        pixAberto += Math.max(0, s.totalAmount - s.paidAmount)
+      } else if (s.cashSettledAt) {
+        emConta += s.totalAmount
+      } else {
+        comVendedores += s.totalAmount
+      }
+    }
+
+    const eventos = raffles.filter((r) => r.active)
+    const eventosBase = eventos.length ? eventos : raffles
+    let totalNumeros = 0
+    let vendidosQtd = 0
+    let vendidosValor = 0
+    let restanteQtd = 0
+    let restanteValor = 0
+    for (const r of eventosBase) {
+      const rs = activeSales.filter((s) => s.raffleId === r.id)
+      const vendidos = qty(rs)
+      const restante = Math.max(0, r.totalNumbers - vendidos)
+      totalNumeros += r.totalNumbers
+      vendidosQtd += vendidos
+      vendidosValor += value(rs)
+      restanteQtd += restante
+      restanteValor += restante * r.ticketPrice
+    }
+
+    const proximoSorteio = eventosBase
+      .map((r) => r.drawDate)
+      .filter((d): d is string => Boolean(d))
+      .map((d) => new Date(d))
+      .filter((d) => !Number.isNaN(d.getTime()))
+      .sort((a, b) => a.getTime() - b.getTime())
+      .find((d) => d.getTime() >= startOfDay)
+    const diasSorteio = proximoSorteio
+      ? Math.round((proximoSorteio.getTime() - startOfDay) / 86_400_000)
+      : null
+
+    const porMembro = members
+      .map((m) => {
+        const ms = activeSales.filter((s) => s.memberId === m.id)
+        const st = memberBlockStats(m.id)
+        return { name: m.name, vendidos: qty(ms), valor: value(ms), restam: st.openNumbers }
+      })
+      .filter((x) => x.vendidos > 0 || x.restam > 0)
+    const maisVendeu = [...porMembro].sort((a, b) => b.vendidos - a.vendidos)[0] || null
+    const menosVendeu =
+      porMembro.length > 1 ? [...porMembro].sort((a, b) => a.vendidos - b.vendidos)[0] : null
+
+    const porComprador = new Map<string, { name: string; numeros: number; valor: number }>()
+    for (const s of activeSales) {
+      const key = s.buyerName.trim().toLowerCase() || '—'
+      const cur = porComprador.get(key) || { name: s.buyerName.trim() || '—', numeros: 0, valor: 0 }
+      cur.numeros += s.numbers.length
+      cur.valor += s.totalAmount
+      porComprador.set(key, cur)
+    }
+    const compradores = [...porComprador.values()]
+    const maiorComprador = [...compradores].sort((a, b) => b.valor - a.valor)[0] || null
+    const menorComprador =
+      compradores.length > 1 ? [...compradores].sort((a, b) => a.valor - b.valor)[0] : null
+
+    const totalValor = value(activeSales)
+    return {
+      hoje: { qtd: hoje.length, valor: value(hoje) },
+      semana: { qtd: semana.length, valor: value(semana) },
+      mes: { qtd: mes.length, valor: value(mes) },
+      total: { qtd: activeSales.length, valor: totalValor },
+      diasSorteio,
+      proximoSorteio,
+      emConta,
+      aReceber: comVendedores + pixAberto,
+      comVendedores,
+      pixAberto,
+      totalNumeros,
+      vendidosQtd,
+      vendidosValor,
+      restanteQtd,
+      restanteValor,
+      maisVendeu,
+      menosVendeu,
+      maiorComprador,
+      menorComprador,
+      ticketMedio: activeSales.length ? totalValor / activeSales.length : 0,
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSales, raffles, members, blocks])
 
   const reports = useMemo(() => {
     return members
@@ -599,17 +715,36 @@ export default function LocalApp() {
       setPixDestination('entidade')
       setProofDataUrl('')
 
+      const saleMeta = {
+        Comprador: buyerName,
+        Números: formatNumbers(selectedNumbers),
+        Quantidade: `${selectedNumbers.length} nº`,
+        Valor: brl(totalAmount),
+        Recebimento: memberCash
+          ? `Dinheiro (${resolvedCashDest === 'loja' ? 'entregue na loja' : 'com o vendedor'})`
+          : `PIX (${resolvedPixDest === 'entidade' ? 'conta da loja' : 'chave do vendedor'})`,
+        Evento: raffles.find((r) => r.id === raffleId)?.eventName,
+        Vendedor: members.find((m) => m.id === sellerId)?.name || who,
+      }
+
       if (memberCash) {
         if (offlineContingency) {
           showToast('Contingência: venda em dinheiro salva neste celular. Sobe pra nuvem quando a rede voltar.')
-          logAudit('venda.contingencia', `${buyerName} · ${brl(totalAmount)}`)
+          logAudit('venda.contingencia', `${buyerName} · ${brl(totalAmount)}`, {
+            ...saleMeta,
+            Situação: 'Salva offline — sobe quando a rede voltar',
+          })
         } else {
           showToast('Venda em dinheiro registrada. Ficou com você — preste contas à entidade.')
-          logAudit('venda.dinheiro', `${buyerName} · ${brl(totalAmount)}`)
+          logAudit('venda.dinheiro', `${buyerName} · ${brl(totalAmount)}`, saleMeta)
         }
       } else {
         showToast(proofPath ? 'Venda registrada (comprovante na nuvem).' : 'Venda registrada.')
-        logAudit('venda.registrar', `${buyerName} · ${brl(totalAmount)}`)
+        logAudit('venda.registrar', `${buyerName} · ${brl(totalAmount)}`, {
+          ...saleMeta,
+          Comprovante: proofPath ? 'Imagem anexada' : undefined,
+          TXID: String(fd.get('proofTxid') || '') || undefined,
+        })
       }
     } catch (err) {
       if (createdSaleId && memberPix) {
@@ -656,6 +791,15 @@ export default function LocalApp() {
       logAudit(
         'venda.pix_cancelada',
         `${sale?.buyerName || 'comprador'} · nº ${formatNumbers(result.numbers)} · motivo: ${reason}`,
+        {
+          Tipo: 'Cancelado por membro',
+          Motivo: reason,
+          Comprador: sale?.buyerName,
+          Números: formatNumbers(result.numbers),
+          Valor: sale ? brl(sale.totalAmount) : undefined,
+          TXID: pixCharges.find((c) => c.saleId === ask.saleId)?.txid,
+          'Cancelado por': who,
+        },
       )
       try {
         await flushWorkspaceToCloud(useStore.getState().exportSnapshot())
@@ -703,6 +847,8 @@ export default function LocalApp() {
   const finishPaidPixSale = () => {
     const buyer = pixModal?.buyerName
     const amount = pixModal?.amount
+    const txid = pixModal?.txid
+    const sale = sales.find((s) => s.id === pixModal?.saleId)
     setPixModal(null)
     setPixPaid(false)
     setSelectedNumbers([])
@@ -710,7 +856,14 @@ export default function LocalApp() {
     setProofDataUrl('')
     if (buyer && amount != null) {
       showToast(`Venda PIX para ${buyer} no valor ${brl(amount)} recebida com sucesso.`)
-      logAudit('venda.pix', `${buyer} · ${brl(amount)}`)
+      logAudit('venda.pix', `${buyer} · ${brl(amount)}`, {
+        Comprador: buyer,
+        Valor: brl(amount),
+        TXID: txid,
+        Recebimento: 'PIX na conta da loja',
+        Números: sale ? formatNumbers(sale.numbers) : undefined,
+        Vendedor: who,
+      })
     }
   }
 
@@ -762,7 +915,15 @@ export default function LocalApp() {
 
       setBaixaSelectedIds([])
       setBaixaConfirmOpen(false)
-      logAudit('dinheiro.liquidar', `${member.name} · ${brl(result.amount)}`)
+      logAudit('dinheiro.liquidar', `${member.name} · ${brl(result.amount)}`, {
+        Membro: member.name,
+        Valor: brl(result.amount),
+        Vendas: `${stillPending.length} venda(s)`,
+        Compradores: stillPending.map((s) => s.buyerName).join(', '),
+        Números: formatNumbers(stillPending.flatMap((s) => s.numbers)),
+        Recebimento: 'Dinheiro prestado à loja',
+        'Assinado por': `ADM ${who} + PIN de ${member.name}`,
+      })
       try {
         await flushWorkspaceToCloud(useStore.getState().exportSnapshot())
         showToast(`Liquidado ${brl(result.amount)} — baixado e assinado por todos.`)
@@ -795,6 +956,13 @@ export default function LocalApp() {
       logAudit(
         'dados.limpar',
         `Apagou ${before.eventos} evento(s), ${before.membros} membro(s) e ${before.vendas} venda(s)`,
+        {
+          Eventos: `${before.eventos}`,
+          Membros: `${before.membros}`,
+          Vendas: `${before.vendas}`,
+          Autorizado: `Senha do ADM ${who}`,
+          Observação: 'O rastro de ações foi mantido',
+        },
       )
       setWipeOpen(false)
       requestCloudPush()
@@ -975,6 +1143,12 @@ export default function LocalApp() {
       logAudit(
         'venda.pix_expirada',
         `${expired.length} venda(s) cancelada(s) por tempo${freed.length ? ` · nº ${formatNumbers(freed)} liberado(s)` : ''}`,
+        {
+          Tipo: 'Cancelado por tempo',
+          Motivo: 'O QR do PIX venceu sem pagamento',
+          Vendas: `${expired.length}`,
+          Números: freed.length ? formatNumbers(freed) : undefined,
+        },
       )
       showToast(
         freed.length
@@ -1436,24 +1610,6 @@ export default function LocalApp() {
               </button>
             </div>
           </div>
-          <div className="hero-metrics">
-            <article className="metric">
-              <span>Membros</span>
-              <strong>{members.length}</strong>
-            </article>
-            <article className="metric">
-              <span>Vendas</span>
-              <strong>{activeSales.length}</strong>
-            </article>
-            <article className="metric">
-              <span>Esperado</span>
-              <strong>{brl(activeSales.reduce((a, s) => a + s.totalAmount, 0))}</strong>
-            </article>
-            <article className="metric">
-              <span>Recebido</span>
-              <strong>{brl(activeSales.reduce((a, s) => a + s.paidAmount, 0))}</strong>
-            </article>
-          </div>
           {isSupabaseConfigured && loadCloudSession()?.workspace.accessCode ? (
             <div className="invite-link-box">
               <h3>Link de acesso da equipe</h3>
@@ -1483,8 +1639,112 @@ export default function LocalApp() {
               </div>
             </div>
           ) : null}
-          <h3>Sugestões TXID</h3>
-          {suggestions.length === 0 && <p className="empty">Nenhuma sugestão agora.</p>}
+          <h3>Resumo</h3>
+          <div className="summary-grid">
+            <article className="summary-card">
+              <span>Membros cadastrados</span>
+              <strong>{members.length}</strong>
+              <em>{resumo.maisVendeu ? `${resumo.maisVendeu.name} lidera as vendas` : 'sem vendas ainda'}</em>
+            </article>
+            <article className="summary-card">
+              <span>Vendas hoje</span>
+              <strong>{resumo.hoje.qtd}</strong>
+              <em>{brl(resumo.hoje.valor)}</em>
+            </article>
+            <article className="summary-card">
+              <span>Vendas na semana</span>
+              <strong>{resumo.semana.qtd}</strong>
+              <em>{brl(resumo.semana.valor)} · últimos 7 dias</em>
+            </article>
+            <article className="summary-card">
+              <span>Vendas no mês</span>
+              <strong>{resumo.mes.qtd}</strong>
+              <em>{brl(resumo.mes.valor)}</em>
+            </article>
+            <article className="summary-card">
+              <span>Vendas no total</span>
+              <strong>{resumo.total.qtd}</strong>
+              <em>{brl(resumo.total.valor)}</em>
+            </article>
+            <article className="summary-card">
+              <span>Dias para o sorteio</span>
+              <strong>{resumo.diasSorteio == null ? '—' : resumo.diasSorteio}</strong>
+              <em>
+                {resumo.proximoSorteio
+                  ? resumo.proximoSorteio.toLocaleDateString('pt-BR')
+                  : 'sem data de sorteio'}
+              </em>
+            </article>
+            <article className="summary-card ok">
+              <span>Valores em conta</span>
+              <strong>{brl(resumo.emConta)}</strong>
+              <em>PIX da loja + dinheiro já prestado</em>
+            </article>
+            <article className="summary-card warn">
+              <span>Valores a receber</span>
+              <strong>{brl(resumo.aReceber)}</strong>
+              <em>
+                {brl(resumo.comVendedores)} com vendedores · {brl(resumo.pixAberto)} PIX em aberto
+              </em>
+            </article>
+            <article className="summary-card">
+              <span>Membro que mais vendeu</span>
+              <strong>{resumo.maisVendeu?.name || '—'}</strong>
+              <em>
+                {resumo.maisVendeu
+                  ? `${resumo.maisVendeu.vendidos} nº vendidos · faltam ${resumo.maisVendeu.restam} nº`
+                  : 'sem vendas'}
+              </em>
+            </article>
+            <article className="summary-card">
+              <span>Membro que menos vendeu</span>
+              <strong>{resumo.menosVendeu?.name || '—'}</strong>
+              <em>
+                {resumo.menosVendeu
+                  ? `${resumo.menosVendeu.vendidos} nº vendidos · faltam ${resumo.menosVendeu.restam} nº`
+                  : 'precisa de 2+ membros'}
+              </em>
+            </article>
+            <article className="summary-card">
+              <span>Números vendidos</span>
+              <strong>{resumo.vendidosQtd}</strong>
+              <em>
+                {brl(resumo.vendidosValor)}
+                {resumo.totalNumeros
+                  ? ` · ${Math.round((resumo.vendidosQtd / resumo.totalNumeros) * 100)}% do total`
+                  : ''}
+              </em>
+            </article>
+            <article className="summary-card">
+              <span>Números a vender</span>
+              <strong>{resumo.restanteQtd}</strong>
+              <em>{brl(resumo.restanteValor)} a arrecadar</em>
+            </article>
+            <article className="summary-card">
+              <span>Maior comprador</span>
+              <strong>{resumo.maiorComprador?.name || '—'}</strong>
+              <em>
+                {resumo.maiorComprador
+                  ? `${resumo.maiorComprador.numeros} nº · ${brl(resumo.maiorComprador.valor)}`
+                  : 'sem compradores'}
+              </em>
+            </article>
+            <article className="summary-card">
+              <span>Menor comprador</span>
+              <strong>{resumo.menorComprador?.name || '—'}</strong>
+              <em>
+                {resumo.menorComprador
+                  ? `${resumo.menorComprador.numeros} nº · ${brl(resumo.menorComprador.valor)}`
+                  : 'precisa de 2+ compradores'}
+              </em>
+            </article>
+            <article className="summary-card">
+              <span>Ticket médio geral</span>
+              <strong>{brl(resumo.ticketMedio)}</strong>
+              <em>por venda registrada</em>
+            </article>
+          </div>
+          {suggestions.length > 0 && <h3>Sugestões TXID</h3>}
           {suggestions.map((s) => {
             const sale = sales.find((x) => x.id === s.saleId)
             const pix = pixPayments.find((x) => x.id === s.pixPaymentId)
@@ -1526,12 +1786,16 @@ export default function LocalApp() {
                   <th>Quem</th>
                   <th>Ação</th>
                   <th>Detalhe</th>
+                  <th>
+                    Detalhes
+                    <div className="th-hint">passe o mouse / toque</div>
+                  </th>
                 </tr>
               </thead>
               <tbody>
                 {(auditLog || []).length === 0 && (
                   <tr>
-                    <td colSpan={4}>
+                    <td colSpan={5}>
                       <p className="empty">Nenhuma ação registrada ainda.</p>
                     </td>
                   </tr>
@@ -1542,6 +1806,17 @@ export default function LocalApp() {
                     <td>{a.actorName}</td>
                     <td>{auditActionLabel[a.action] || a.action}</td>
                     <td>{a.detail || '—'}</td>
+                    <td>
+                      <InfoPopover
+                        label="Ver detalhes"
+                        title={auditActionLabel[a.action] || a.action}
+                        lines={[
+                          ...auditPopoverLines(a),
+                          `Quem: ${a.actorName}`,
+                          `Quando: ${new Date(a.at).toLocaleString('pt-BR')}`,
+                        ]}
+                      />
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -1588,18 +1863,32 @@ export default function LocalApp() {
                     email,
                     password: tempPassword,
                   })
-                  logAudit('membro.acesso_total', `${result.member.name} · ${email}`)
+                  logAudit('membro.acesso_total', `${result.member.name} · ${email}`, {
+                    Membro: result.member.name,
+                    WhatsApp: phone || undefined,
+                    'Acesso total': 'Sim — também é ADM da equipe',
+                    'E-mail de login': email,
+                    Senha: 'Provisória, troca obrigatória no 1º login',
+                  })
                   showToast(
                     `Membro ${result.member.name} criado com acesso total. No 1º login com e-mail, deve trocar a senha.`,
                   )
                 } catch (err) {
-                  logAudit('membro.criar', result.member.name)
+                  logAudit('membro.criar', result.member.name, {
+                    Membro: result.member.name,
+                    WhatsApp: phone || undefined,
+                    'Acesso total': `Tentou liberar e falhou: ${err instanceof Error ? err.message : 'erro'}`,
+                  })
                   showToast(
                     `Membro criado, mas falhou o acesso total: ${err instanceof Error ? err.message : 'erro'}`,
                   )
                 }
               } else {
-                logAudit('membro.criar', result.member.name)
+                logAudit('membro.criar', result.member.name, {
+                  Membro: result.member.name,
+                  WhatsApp: phone || undefined,
+                  'Acesso total': 'Não — só vende pelos blocos',
+                })
                 showToast(`Membro ${result.member.name} criado.`)
               }
               e.currentTarget.reset()
@@ -1683,6 +1972,12 @@ export default function LocalApp() {
               logAudit(
                 'bloco.atribuir',
                 `${assignedLabels || `${ok} bloco(s)`} → ${members.find((m) => m.id === memberIdSel)?.name || 'membro'}`,
+                {
+                  Blocos: assignedLabels,
+                  Quantidade: `${ok} bloco(s)`,
+                  Para: members.find((m) => m.id === memberIdSel)?.name,
+                  Evento: raffles.find((r) => r.id === (filterEventId || raffles[0]?.id))?.eventName,
+                },
               )
               showToast(ok === 1 ? 'Bloco atribuído ao membro.' : `${ok} blocos atribuídos ao membro.`)
               requestCloudPush()
@@ -1823,7 +2118,12 @@ export default function LocalApp() {
                                 onClick={() => {
                                   if (!askProceed()) return
                                   unassignBlock(b.id)
-                                  logAudit('bloco.liberar', `${b.label} · de ${m.name}`)
+                                  logAudit('bloco.liberar', `${b.label} · de ${m.name}`, {
+                                    Bloco: `${b.label} (nº ${b.fromNumber}–${b.toNumber})`,
+                                    De: m.name,
+                                    Situação: `${bs.open} de ${bs.total} nº ainda abertos`,
+                                    Evento: raffles.find((r) => r.id === b.raffleId)?.eventName,
+                                  })
                                   requestCloudPush()
                                 }}
                               >
@@ -1839,7 +2139,12 @@ export default function LocalApp() {
                       onClick={() => {
                         if (!askProceed('Tem certeza que deseja remover este membro?')) return
                         removeMember(m.id)
-                        logAudit('membro.remover', m.name)
+                        logAudit('membro.remover', m.name, {
+                          Membro: m.name,
+                          WhatsApp: m.phone || undefined,
+                          'Blocos que tinha': memberBlocks.map((b) => b.label).join(', ') || 'nenhum',
+                          'Números vendidos': `${st.soldNumbers}`,
+                        })
                         requestCloudPush()
                       }}
                     >
@@ -1869,8 +2174,8 @@ export default function LocalApp() {
                 if (!result.ok) return showToast(result.error || 'Erro')
                 ok += 1
               }
-              const movedLabels = blocks
-                .filter((b) => transferBlockIds.includes(b.id))
+              const movedBlocks = blocks.filter((b) => transferBlockIds.includes(b.id))
+              const movedLabels = movedBlocks
                 .map((b) => `${b.label} (de ${members.find((m) => m.id === b.memberId)?.name || 'livre'})`)
                 .join(', ')
               setTransferBlockIds([])
@@ -1879,6 +2184,17 @@ export default function LocalApp() {
               logAudit(
                 'bloco.transferir',
                 `${movedLabels || `${ok} bloco(s)`} → ${members.find((m) => m.id === toMember)?.name || 'membro'}`,
+                {
+                  Blocos: movedBlocks.map((b) => b.label).join(', '),
+                  Quantidade: `${ok} bloco(s)`,
+                  De: [
+                    ...new Set(
+                      movedBlocks.map((b) => members.find((m) => m.id === b.memberId)?.name || 'livre'),
+                    ),
+                  ].join(', '),
+                  Para: members.find((m) => m.id === toMember)?.name,
+                  'Números abertos': `${movedBlocks.reduce((acc, b) => acc + blockStats(b.id).open, 0)}`,
+                },
               )
               requestCloudPush()
             }}
@@ -2043,6 +2359,18 @@ export default function LocalApp() {
                   logAudit(
                     'evento.criar',
                     `${result.raffle.eventName} · ${result.raffle.blockCount} bloco(s) × ${result.raffle.numbersPerBlock} nº · ${brl(result.raffle.ticketPrice)}/nº`,
+                    {
+                      Evento: result.raffle.eventName,
+                      Rifa: result.raffle.name,
+                      Premiação: result.raffle.prize,
+                      Blocos: `${result.raffle.blockCount} × ${result.raffle.numbersPerBlock} nº`,
+                      'Total de números': `${result.raffle.totalNumbers}`,
+                      'Valor por número': brl(result.raffle.ticketPrice),
+                      'Arrecadação prevista': brl(result.raffle.totalNumbers * result.raffle.ticketPrice),
+                      Sorteio: result.raffle.drawDate
+                        ? new Date(result.raffle.drawDate).toLocaleDateString('pt-BR')
+                        : undefined,
+                    },
                   )
                   requestCloudPush()
                 }}
@@ -2134,7 +2462,12 @@ export default function LocalApp() {
                       onClick={() => {
                         if (!askProceed('Remover este evento e todos os blocos dele?')) return
                         removeRaffle(r.id)
-                        logAudit('evento.remover', r.eventName)
+                        logAudit('evento.remover', r.eventName, {
+                          Evento: r.eventName,
+                          Blocos: `${r.blockCount || eventBlocks.length}`,
+                          'Total de números': `${r.totalNumbers}`,
+                          'Vendas do evento': `${activeSales.filter((s) => s.raffleId === r.id).length}`,
+                        })
                         setOpenEventId(null)
                         requestCloudPush()
                       }}
@@ -3087,13 +3420,16 @@ export default function LocalApp() {
                 disabled={!(auditLog || []).length}
                 onClick={() => {
                   downloadCsv(`rifapix-auditoria-${new Date().toISOString().slice(0, 10)}.csv`, [
-                    ['Quando', 'Quem', 'Ação', 'Código', 'Detalhe'],
+                    ['Quando', 'Quem', 'Ação', 'Código', 'Detalhe', 'Detalhes'],
                     ...(auditLog || []).map((a) => [
                       new Date(a.at).toLocaleString('pt-BR'),
                       a.actorName,
                       auditActionLabel[a.action] || a.action,
                       a.action,
                       a.detail || '',
+                      Object.entries(a.meta || {})
+                        .map(([k, v]) => `${k}: ${v}`)
+                        .join(' | '),
                     ]),
                   ])
                   showToast('CSV da auditoria exportado.')
@@ -3138,12 +3474,16 @@ export default function LocalApp() {
                         <th>Quem</th>
                         <th>Ação</th>
                         <th>Detalhe</th>
+                        <th>
+                          Detalhes
+                          <div className="th-hint">passe o mouse / toque</div>
+                        </th>
                       </tr>
                     </thead>
                     <tbody>
                       {rows.length === 0 && (
                         <tr>
-                          <td colSpan={4}>
+                          <td colSpan={5}>
                             <p className="empty">
                               {(auditLog || []).length
                                 ? 'Nenhum registro para esta busca.'
@@ -3163,6 +3503,17 @@ export default function LocalApp() {
                             </div>
                           </td>
                           <td>{a.detail || '—'}</td>
+                          <td>
+                            <InfoPopover
+                              label="Ver detalhes"
+                              title={auditActionLabel[a.action] || a.action}
+                              lines={[
+                                ...auditPopoverLines(a),
+                                `Quem: ${a.actorName}`,
+                                `Quando: ${new Date(a.at).toLocaleString('pt-BR')}`,
+                              ]}
+                            />
+                          </td>
                         </tr>
                       ))}
                     </tbody>

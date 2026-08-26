@@ -367,6 +367,12 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
         setError(
           'Armazenamento do Safari cheio. Em Ajustes → Safari → Avançado → Dados de sites, apague andrerostirolla.github.io e tente de novo. (Não dá para limpar isso remotamente.)',
         )
+      } else if (/invalid path/i.test(msg)) {
+        setError(
+          'URL do Auth inválida no Supabase. Em Authentication → URL Configuration, Site URL = https://andrerostirolla.github.io/rifa-pix/ e salve. Se você já tem conta, clique em “Já tenho conta” e use Entrar (não Criar conta).',
+        )
+      } else if (/already registered|user already/i.test(msg)) {
+        setError('Este e-mail já tem conta. Clique em “Já tenho conta” e use Entrar.')
       } else {
         setError(msg)
       }

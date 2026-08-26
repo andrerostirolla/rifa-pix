@@ -1,9 +1,20 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 
-const url = import.meta.env.VITE_SUPABASE_URL as string | undefined
-const anon = (import.meta.env.VITE_SUPABASE_ANON_KEY || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY) as
+function normalizeSupabaseUrl(raw: string | undefined) {
+  if (!raw) return undefined
+  let u = raw.trim().replace(/\/+$/, '')
+  // Erros comuns: colar URL do dashboard ou /rest/v1
+  u = u.replace(/\/rest\/v1$/i, '').replace(/\/auth\/v1$/i, '')
+  if (/supabase\.com\/dashboard/i.test(u)) return undefined
+  if (!/^https:\/\/[a-z0-9-]+\.supabase\.co$/i.test(u)) return undefined
+  return u
+}
+
+const url = normalizeSupabaseUrl(import.meta.env.VITE_SUPABASE_URL as string | undefined)
+const anonRaw = (import.meta.env.VITE_SUPABASE_ANON_KEY || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY) as
   | string
   | undefined
+const anon = anonRaw?.trim()
 
 /** Detecta JWT service_role (nunca pode ir no browser / VITE_*). */
 function looksLikeServiceRoleKey(key: string) {
@@ -19,7 +30,13 @@ function looksLikeServiceRoleKey(key: string) {
 }
 
 export const supabaseConfigError: string | null = (() => {
-  if (!url || !anon || url.includes('YOUR_')) return null
+  const rawUrl = String(import.meta.env.VITE_SUPABASE_URL || '').trim()
+  if (!rawUrl || !anon || rawUrl.includes('YOUR_')) return null
+  if (!url) {
+    return (
+      'VITE_SUPABASE_URL inválida. Use só https://SEU_REF.supabase.co (Project URL), sem /rest/v1 e sem link do dashboard. Depois rode o Deploy de novo.'
+    )
+  }
   if (looksLikeServiceRoleKey(anon)) {
     return (
       'Chave errada no site: foi colocada a service_role (secreta). ' +
@@ -29,10 +46,15 @@ export const supabaseConfigError: string | null = (() => {
   return null
 })()
 
-export const isSupabaseConfigured = Boolean(url && anon && !url.includes('YOUR_'))
+export const isSupabaseConfigured = Boolean(url && anon && !String(import.meta.env.VITE_SUPABASE_URL || '').includes('YOUR_'))
 
 export const supabase: SupabaseClient | null =
-  isSupabaseConfigured && !supabaseConfigError ? createClient(url!, anon!) : null
+  isSupabaseConfigured && !supabaseConfigError && url && anon ? createClient(url, anon) : null
+
+export function authRedirectTo() {
+  const base = import.meta.env.BASE_URL || '/rifa-pix/'
+  return `${window.location.origin}${base}`
+}
 
 export type DbRaffle = {
   id: string

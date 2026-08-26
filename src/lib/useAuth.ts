@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { Session, User } from '@supabase/supabase-js'
-import { isSupabaseConfigured, supabase } from './supabase'
+import { authRedirectTo, isSupabaseConfigured, supabase } from './supabase'
 
 export function useAuth() {
   const [session, setSession] = useState<Session | null>(null)
@@ -38,7 +38,10 @@ export function useAuth() {
         const { error } = await supabase.auth.signUp({
           email,
           password,
-          options: { data: { organizer_name: organizerName } },
+          options: {
+            data: { organizer_name: organizerName },
+            emailRedirectTo: authRedirectTo(),
+          },
         })
         if (error) throw error
       },

@@ -416,6 +416,55 @@ th {
   color: #b42318;
 }
 
+.form-error {
+  margin: 0.75rem 0 0;
+  padding: 0.6rem 0.75rem;
+  border-radius: 10px;
+  border: 1px solid #f2b8b5;
+  background: #fdecea;
+  color: #b42318;
+  font-weight: 600;
+}
+
+.secret-field {
+  position: relative;
+  display: block;
+}
+
+.secret-field input {
+  width: 100%;
+  padding-right: 2.75rem;
+}
+
+.secret-toggle {
+  position: absolute;
+  top: 50%;
+  right: 0.4rem;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #5b6b64;
+  cursor: pointer;
+}
+
+.secret-toggle:hover {
+  background: rgba(20, 32, 28, 0.08);
+  color: #14201c;
+}
+
+.baixa-confirm-list {
+  max-height: 12rem;
+  overflow: auto;
+  margin-bottom: 0.5rem;
+}
+
 tr.row-assign {
   background: rgba(46, 160, 100, 0.12);
 }

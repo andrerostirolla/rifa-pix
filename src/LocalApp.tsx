@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { getAuthRecord, getSession, logout, verifyAdminPassword } from './auth'
+import { getAuthRecord, getSession, logout } from './auth'
 import { NumberGrid } from './NumberGrid'
 import { isSupabaseConfigured, supabase } from './lib/supabase'
 import { openProofUrl, resolveProofUrl, uploadProofFile } from './lib/proofs'
@@ -14,6 +14,9 @@ import {
 import { createWorkspaceAdmin, logAudit } from './lib/audit'
 import { useCloudSync } from './lib/cloudSyncContext'
 import { PixChargeModal } from './PixChargeModal'
+import { SettlementConfirmModal } from './SettlementConfirmModal'
+import { adminCredentialHint, verifyAdminCredential } from './lib/adminGuard'
+import { formatErr } from './lib/errors'
 import { brl, formatNumbers, useStore } from './store'
 import { TeamChat } from './TeamChat'
 import { InstallAppButton } from './InstallAppButton'
@@ -128,6 +131,8 @@ export default function LocalApp() {
   const [baixaMemberId, setBaixaMemberId] = useState('')
   const [baixaSelectedIds, setBaixaSelectedIds] = useState<string[]>([])
   const [settlingBaixa, setSettlingBaixa] = useState(false)
+  const [baixaConfirmOpen, setBaixaConfirmOpen] = useState(false)
+  const [baixaConfirmError, setBaixaConfirmError] = useState<string | null>(null)
   const [fullAccess, setFullAccess] = useState(false)
   const [openBlockId, setOpenBlockId] = useState<string | null>(null)
   const [openEventId, setOpenEventId] = useState<string | null>(null)
@@ -593,6 +598,67 @@ export default function LocalApp() {
     if (buyer && amount != null) {
       showToast(`Venda PIX para ${buyer} no valor ${brl(amount)} recebida com sucesso.`)
       logAudit('venda.pix', `${buyer} · ${brl(amount)}`)
+    }
+  }
+
+  const confirmCashSettlement = async (adminPassword: string, memberPin: string) => {
+    const member = members.find((m) => m.id === baixaMemberId)
+    if (!member) {
+      setBaixaConfirmError('Membro não encontrado. Selecione de novo.')
+      return
+    }
+
+    // A lista pode ter mudado por sync enquanto o modal estava aberto
+    const stillPending = useStore
+      .getState()
+      .sales.filter((s) => baixaSelectedIds.includes(s.id) && s.memberId === member.id && isCashPending(s))
+    if (!stillPending.length) {
+      setBaixaConfirmError('Essas vendas já foram baixadas ou mudaram. Feche e marque de novo.')
+      return
+    }
+
+    setSettlingBaixa(true)
+    setBaixaConfirmError(null)
+    try {
+      try {
+        await verifyAdminCredential(adminPassword)
+      } catch (err) {
+        setBaixaConfirmError(formatErr(err, 'Senha do ADM inválida.'))
+        return
+      }
+
+      const expectedPin = String(member.pin || '').trim()
+      if (!expectedPin) {
+        setBaixaConfirmError('Este membro não tem PIN cadastrado. Edite o membro antes de baixar.')
+        return
+      }
+      if (memberPin.trim() !== expectedPin) {
+        setBaixaConfirmError('PIN do membro incorreto.')
+        return
+      }
+
+      const result = settleCashSales({
+        memberId: member.id,
+        saleIds: stillPending.map((s) => s.id),
+        memberName: member.name,
+      })
+      if (!result.ok) {
+        setBaixaConfirmError(result.error)
+        return
+      }
+
+      setBaixaSelectedIds([])
+      setBaixaConfirmOpen(false)
+      logAudit('dinheiro.liquidar', `${member.name} · ${brl(result.amount)}`)
+      try {
+        await flushWorkspaceToCloud(useStore.getState().exportSnapshot())
+        showToast(`Liquidado ${brl(result.amount)} — baixado e assinado por todos.`)
+      } catch (syncErr) {
+        console.warn('Baixa salva local, falha ao subir', syncErr)
+        showToast(`Liquidado ${brl(result.amount)} localmente. Sobe para a nuvem no próximo sync.`)
+      }
+    } finally {
+      setSettlingBaixa(false)
     }
   }
 
@@ -2160,44 +2226,10 @@ export default function LocalApp() {
                     type="button"
                     className="btn btn-primary"
                     disabled={baixaQuitTotal <= 0 || settlingBaixa}
-                    onClick={async () => {
+                    onClick={() => {
                       if (baixaQuitTotal <= 0 || settlingBaixa) return
-                      if (!askProceed()) return
-                      const member = members.find((m) => m.id === baixaMemberId)
-                      if (!member) return
-                      const admPwd = window.prompt(
-                        getAuthRecord()
-                          ? 'Senha do ADM:'
-                          : 'Senha do ADM não configurada. Digite CONFIRMAR:',
-                      )
-                      if (admPwd == null) return
-                      try {
-                        await verifyAdminPassword(admPwd)
-                      } catch (err) {
-                        return showToast(err instanceof Error ? err.message : 'Senha ADM inválida')
-                      }
-                      const pin = window.prompt(`PIN do membro ${member.name}:`)
-                      if (pin == null) return
-                      if (pin.trim() !== member.pin.trim()) return showToast('PIN do membro incorreto.')
-                      setSettlingBaixa(true)
-                      try {
-                        const result = settleCashSales({
-                          memberId: member.id,
-                          saleIds: baixaSelectedIds,
-                          memberName: member.name,
-                        })
-                        if (!result.ok) return showToast(result.error)
-                        setBaixaSelectedIds([])
-                        try {
-                          await flushWorkspaceToCloud(useStore.getState().exportSnapshot())
-                        } catch (syncErr) {
-                          console.warn(syncErr)
-                        }
-                        showToast(`Liquidado ${brl(result.amount)} — baixado e assinado por todos.`)
-                        logAudit('dinheiro.liquidar', `${member.name} · ${brl(result.amount)}`)
-                      } finally {
-                        setSettlingBaixa(false)
-                      }
+                      setBaixaConfirmError(null)
+                      setBaixaConfirmOpen(true)
                     }}
                   >
                     {settlingBaixa ? 'Liquidando…' : `Liquidar ${brl(baixaQuitTotal)}`}
@@ -2611,17 +2643,23 @@ export default function LocalApp() {
                       })
                     const cashRows = selectedReport.settlements
                       .filter((x) => x.kind === 'dinheiro')
-                      .map((x) => ({
-                        id: x.id,
-                        when: x.createdAt,
-                        tipo: 'Dinheiro',
-                        buyer: x.saleIds?.length
-                          ? `${x.saleIds.length} venda(s)`
-                          : 'Prestação',
-                        numbers: '—',
-                        amount: x.amount,
-                        detail: x.note || '—',
-                      }))
+                      .map((x) => {
+                        const linked = (x.saleIds || [])
+                          .map((id) => sales.find((s) => s.id === id))
+                          .filter((s): s is (typeof sales)[number] => Boolean(s))
+                        const linkedNumbers = linked.flatMap((s) => s.numbers).sort((a, b) => a - b)
+                        return {
+                          id: x.id,
+                          when: x.createdAt,
+                          tipo: 'Dinheiro',
+                          buyer: linked.length
+                            ? linked.map((s) => s.buyerName).join(', ')
+                            : 'Prestação avulsa',
+                          numbers: linkedNumbers.length ? formatNumbers(linkedNumbers) : '—',
+                          amount: x.amount,
+                          detail: x.note || '—',
+                        }
+                      })
                     const rows = [...pixPaidRows, ...cashRows].sort((a, b) =>
                       String(b.when).localeCompare(String(a.when)),
                     )
@@ -2759,6 +2797,28 @@ export default function LocalApp() {
           expiresAt={pixModal.expiresAt}
           onCancel={() => void cancelPendingPixSale()}
           onClosePaid={finishPaidPixSale}
+        />
+      )}
+      {baixaConfirmOpen && (
+        <SettlementConfirmModal
+          memberName={members.find((m) => m.id === baixaMemberId)?.name || 'membro'}
+          lines={baixaPendingSales
+            .filter((s) => baixaSelectedIds.includes(s.id))
+            .map((s) => ({
+              id: s.id,
+              buyerName: s.buyerName,
+              numbers: formatNumbers(s.numbers),
+              amount: s.totalAmount,
+            }))}
+          total={baixaQuitTotal}
+          adminHint={adminCredentialHint()}
+          busy={settlingBaixa}
+          error={baixaConfirmError}
+          onCancel={() => {
+            setBaixaConfirmOpen(false)
+            setBaixaConfirmError(null)
+          }}
+          onConfirm={(pwd, pin) => void confirmCashSettlement(pwd, pin)}
         />
       )}
       {toast && <div className="toast">{toast}</div>}

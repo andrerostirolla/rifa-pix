@@ -1,12 +1,23 @@
 import { useCloudSync } from './lib/cloudSyncContext'
 
 /**
- * Aviso de contingência (não bloqueia a tela):
- * sem nuvem → só dinheiro local; PIX bloqueado; sobe quando voltar a rede.
+ * Contingência só para membro vendendo sem nuvem.
+ * ADM vê aviso leve (não bloqueia o painel).
  */
 export function CloudRequiredBanner() {
-  const { status, error, cloudOk } = useCloudSync()
+  const { status, error, cloudOk, mode } = useCloudSync()
   if (cloudOk && status !== 'offline') return null
+
+  if (mode === 'admin') {
+    return (
+      <div className="cloud-admin-warn" role="status">
+        Sem sync momentâneo{error ? `: ${error}` : ''}. Dados locais seguem na tela — toque em reconectar se precisar.
+        <button type="button" className="linkish" onClick={() => window.location.reload()}>
+          Reconectar
+        </button>
+      </div>
+    )
+  }
 
   return (
     <div className="cloud-contingency-banner" role="status">

@@ -1387,10 +1387,28 @@ button.block-card {
   font-weight: 800;
 }
 
-.contingency-hint {
-  color: #8a1f16;
-  font-weight: 700;
+.cloud-admin-warn {
+  position: sticky;
+  top: 0;
+  z-index: 90;
+  padding: 0.45rem 0.75rem;
+  background: #8a5a00;
+  color: #fff;
+  font-size: 0.88rem;
+  font-weight: 600;
+  text-align: center;
 }
+
+.cloud-admin-warn .linkish {
+  margin-left: 0.5rem;
+  color: #fff;
+  text-decoration: underline;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-weight: 800;
+}
+
 
 .invite-link-box {
   margin: 1rem 0 1.25rem;

@@ -243,10 +243,15 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
         setSyncError(null)
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Falha ao baixar'
+      const msg = formatErr(err, 'Falha ao baixar')
       console.warn('Falha ao puxar da nuvem', err)
-      setSyncStatus('offline')
       setSyncError(msg)
+      // Já tem workspace em memória: não dispara contingência por um pull falho
+      if (updatedAtRef.current) {
+        setSyncStatus('sincronizado')
+      } else {
+        setSyncStatus('offline')
+      }
     } finally {
       pullingRef.current = false
     }
@@ -499,6 +504,7 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
         status: syncStatus,
         error: syncError,
         cloudOk: syncStatus !== 'offline',
+        mode,
       }}
     >
       <AppUpdateBanner />

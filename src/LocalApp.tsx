@@ -4,7 +4,7 @@ import { getAuthRecord, getSession, logout, verifyAdminPassword } from './auth'
 import { NumberGrid } from './NumberGrid'
 import { isSupabaseConfigured, supabase } from './lib/supabase'
 import { openProofUrl, resolveProofUrl, uploadProofFile } from './lib/proofs'
-import { loadCloudSession, saveCloudSession, flushWorkspaceToCloud, fetchByAccessCode, syncCloudSessionMeta } from './lib/workspace'
+import { loadCloudSession, saveCloudSession, flushWorkspaceToCloud, fetchByAccessCode, syncCloudSessionMeta, requestCloudPush } from './lib/workspace'
 import {
   createWorkspacePixCharge,
   checkWorkspacePixCharge,
@@ -27,6 +27,18 @@ const statusLabel: Record<PaymentStatus, string> = {
   parcial: 'Parcial',
   quitado: 'Quitado',
   divergente: 'Divergente',
+}
+
+function isPixChargeExpired(charge?: { status: string; expiresAt?: string; createdAt?: string }) {
+  if (!charge) return false
+  if (charge.status === 'expired' || charge.status === 'cancelled') return true
+  if (charge.status !== 'pending') return false
+  const expMs = charge.expiresAt
+    ? new Date(charge.expiresAt).getTime()
+    : charge.createdAt
+      ? new Date(charge.createdAt).getTime() + 30 * 60 * 1000
+      : null
+  return expMs != null && expMs < Date.now()
 }
 
 function askProceed(message = 'Tem certeza que deseja prosseguir com essa operação?') {
@@ -163,6 +175,7 @@ export default function LocalApp() {
   const addSale = useStore((s) => s.addSale)
   const removeSale = useStore((s) => s.removeSale)
   const settlePixChargeByTxid = useStore((s) => s.settlePixChargeByTxid)
+  const expireStalePixCharges = useStore((s) => s.expireStalePixCharges)
   const registerPixCharge = useStore((s) => s.registerPixCharge)
   const createChargeForSale = useStore((s) => s.createChargeForSale)
   const amortize = useStore((s) => s.amortize)
@@ -712,7 +725,7 @@ export default function LocalApp() {
         s.memberId === memberId &&
         s.paymentMethod === 'pix' &&
         s.status === 'pendente' &&
-        pixCharges.some((c) => c.saleId === s.id && c.status === 'pending' && c.txid),
+        pixCharges.some((c) => c.saleId === s.id && c.status === 'pending' && c.txid && !isPixChargeExpired(c)),
     )
     if (!pending.length) return
     const tick = () => {
@@ -732,6 +745,18 @@ export default function LocalApp() {
     void syncPixChargesFromCloud()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAdmin, adminTab])
+
+  // QR vencido: libera números e some da lista (venda PIX nunca paga)
+  useEffect(() => {
+    if (isAdmin) return
+    const tick = () => {
+      if (!expireStalePixCharges()) return
+      void flushWorkspaceToCloud(useStore.getState().exportSnapshot()).catch(() => {})
+    }
+    tick()
+    const id = window.setInterval(tick, 30_000)
+    return () => window.clearInterval(id)
+  }, [isAdmin, expireStalePixCharges])
 
   if (!session) {
     return (
@@ -1063,7 +1088,14 @@ export default function LocalApp() {
                 <tbody>
                   {visibleSales.map((s) => {
                     const charge = pixCharges.find((c) => c.saleId === s.id)
-                    const waitingPix = s.paymentMethod === 'pix' && s.status === 'pendente'
+                    const pixExpired = isPixChargeExpired(charge)
+                    const waitingPix =
+                      s.paymentMethod === 'pix' && s.status === 'pendente' && !pixExpired
+                    const badgeLabel = waitingPix
+                      ? 'Aguardando PIX'
+                      : pixExpired
+                        ? 'PIX expirado'
+                        : statusLabel[s.status]
                     return (
                       <tr key={s.id}>
                         <td>{s.buyerName}</td>
@@ -1085,12 +1117,17 @@ export default function LocalApp() {
                                 <br />
                                 <span className="pix-pending-hint">Aguardando pagamento…</span>
                               </>
+                            ) : pixExpired ? (
+                              <>
+                                <br />
+                                <span className="pix-pending-hint">QR expirou — números liberados</span>
+                              </>
                             ) : null}
                           </div>
                         </td>
                         <td>
-                          <span className={`badge ${waitingPix ? 'falha' : s.status}`}>
-                            {waitingPix ? 'Aguardando PIX' : statusLabel[s.status]}
+                          <span className={`badge ${waitingPix || pixExpired ? 'falha' : s.status}`}>
+                            {badgeLabel}
                           </span>
                         </td>
                       </tr>
@@ -1118,6 +1155,7 @@ export default function LocalApp() {
                 onClick={() => {
                   if (!askProceed()) return
                   seedDemo()
+                  requestCloudPush()
                   showToast('Demo: 4 blocos×50. Carlos PIN 1234 (blocos 1–2), Fernanda PIN 5678 (3–4).')
                 }}
               >
@@ -1129,6 +1167,7 @@ export default function LocalApp() {
                 onClick={() => {
                   if (!askProceed('Tem certeza que deseja limpar todos os dados?')) return
                   resetAll()
+                  requestCloudPush()
                   showToast('Dados limpos.')
                 }}
               >
@@ -1202,6 +1241,7 @@ export default function LocalApp() {
                   onClick={() => {
                     const r = amortize(s.saleId, s.pixPaymentId, s.amount, 'Conferência TXID')
                     showToast(r.ok ? 'Baixa aplicada.' : r.error || 'Erro')
+                    if (r.ok) requestCloudPush()
                   }}
                 >
                   Amortizar
@@ -1299,6 +1339,7 @@ export default function LocalApp() {
               }
               e.currentTarget.reset()
               setFullAccess(false)
+              requestCloudPush()
             }}
           >
             <div className="panel-head">
@@ -1372,6 +1413,7 @@ export default function LocalApp() {
               e.currentTarget.reset()
               logAudit('bloco.atribuir', `${ok} bloco(s) → membro`)
               showToast(ok === 1 ? 'Bloco atribuído ao membro.' : `${ok} blocos atribuídos ao membro.`)
+              requestCloudPush()
             }}
           >
             <div className="panel-head">
@@ -1509,6 +1551,7 @@ export default function LocalApp() {
                                 onClick={() => {
                                   if (!askProceed()) return
                                   unassignBlock(b.id)
+                                  requestCloudPush()
                                 }}
                               >
                                 liberar
@@ -1523,6 +1566,7 @@ export default function LocalApp() {
                       onClick={() => {
                         if (!askProceed('Tem certeza que deseja remover este membro?')) return
                         removeMember(m.id)
+                        requestCloudPush()
                       }}
                     >
                       Remover membro
@@ -1555,6 +1599,7 @@ export default function LocalApp() {
               e.currentTarget.reset()
               showToast(ok === 1 ? 'Transferência registrada.' : `${ok} transferências registradas.`)
               logAudit('bloco.transferir', `${ok} bloco(s)`)
+              requestCloudPush()
             }}
           >
             <div className="panel-head">
@@ -1714,6 +1759,7 @@ export default function LocalApp() {
                   if (!result.ok) return showToast(result.error)
                   e.currentTarget.reset()
                   showToast(`Evento criado com ${result.raffle.blockCount} blocos.`)
+                  requestCloudPush()
                 }}
               >
                 <div className="panel-head">
@@ -1797,7 +1843,7 @@ export default function LocalApp() {
                         ← Voltar aos eventos
                       </button>
                     </div>
-                    <button type="button" className="btn btn-danger" onClick={() => { removeRaffle(r.id); setOpenEventId(null) }}>
+                    <button type="button" className="btn btn-danger" onClick={() => { removeRaffle(r.id); setOpenEventId(null); requestCloudPush() }}>
                       Remover evento
                     </button>
                   </div>

@@ -134,6 +134,8 @@ type Store = AppState & {
     amount?: number,
     saleId?: string,
   ) => { ok: true; saleId: string } | { ok: false; error: string }
+  /** PIX pendente com QR vencido: libera números (remove venda não paga). */
+  expireStalePixCharges: () => boolean
   attachTxidToSale: (
     saleId: string,
     txid: string,
@@ -730,6 +732,35 @@ export const useStore = create<Store>()(
           ),
         }))
         return { ok: true, saleId: sid }
+      },
+
+      expireStalePixCharges: () => {
+        const now = Date.now()
+        const PIX_TTL_MS = 30 * 60 * 1000
+        let changed = false
+        set((s) => {
+          const dropSaleIds = new Set<string>()
+          const pixCharges = s.pixCharges.map((c) => {
+            if (c.status !== 'pending') return c
+            const expMs = c.expiresAt
+              ? new Date(c.expiresAt).getTime()
+              : c.createdAt
+                ? new Date(c.createdAt).getTime() + PIX_TTL_MS
+                : null
+            if (!expMs || expMs >= now) return c
+            changed = true
+            if (c.saleId) dropSaleIds.add(c.saleId)
+            return { ...c, status: 'expired' as const }
+          })
+          if (!changed) return s
+          const sales = s.sales.filter((sale) => {
+            if (!dropSaleIds.has(sale.id)) return true
+            if (sale.status === 'quitado') return true
+            return false
+          })
+          return { pixCharges, sales }
+        })
+        return changed
       },
 
       attachTxidToSale: (saleId, txid, amount, proofImageDataUrl) => {

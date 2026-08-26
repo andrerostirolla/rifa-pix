@@ -111,7 +111,7 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
     }
     window.setTimeout(() => {
       applyingRemoteRef.current = false
-    }, 0)
+    }, 400)
   }
 
   const broadcastUpdated = async (updatedAt: string) => {
@@ -161,7 +161,16 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
       try {
         if (session.role === 'admin') {
           if (!session.workspace.id) throw new Error('Workspace sem id')
-          updatedAt = await saveOwnerWorkspaceState(session.workspace.id, state)
+          const opened = await fetchOwnerWorkspace(session.workspace.id, session.workspace.accessCode)
+          if (isNewer(opened.meta.updatedAt, updatedAtRef.current)) {
+            state = mergeContingencyState(opened.state, state)
+            applyingRemoteRef.current = true
+            useStore.getState().importSnapshot(state)
+            window.setTimeout(() => {
+              applyingRemoteRef.current = false
+            }, 0)
+          }
+          updatedAt = await saveOwnerWorkspaceState(session.workspace.id, state, session.workspace.accessCode)
         } else {
           updatedAt = await saveByAccessCode(session.workspace.accessCode, state, updatedAtRef.current)
         }
@@ -171,7 +180,7 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
         // Nuvem mudou enquanto estava offline: mescla vendas locais e sobe de novo
         const opened =
           session.role === 'admin' && session.workspace.id
-            ? await fetchOwnerWorkspace(session.workspace.id)
+            ? await fetchOwnerWorkspace(session.workspace.id, session.workspace.accessCode)
             : await fetchByAccessCode(session.workspace.accessCode)
         state = mergeContingencyState(opened.state, snapshotFromStore())
         applyingRemoteRef.current = true
@@ -180,7 +189,7 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
           applyingRemoteRef.current = false
         }, 0)
         if (session.role === 'admin' && session.workspace.id) {
-          updatedAt = await saveOwnerWorkspaceState(session.workspace.id, state)
+          updatedAt = await saveOwnerWorkspaceState(session.workspace.id, state, session.workspace.accessCode)
         } else {
           updatedAt = await saveByAccessCode(session.workspace.accessCode, state, opened.meta.updatedAt)
         }
@@ -194,8 +203,18 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
       setSyncError(null)
       void broadcastUpdated(updatedAt)
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Falha ao salvar'
+      const msg = formatErr(err, 'Falha ao salvar')
       console.warn('Falha ao salvar na nuvem', err)
+      if (session.role === 'admin') {
+        try {
+          dirtyRef.current = false
+          pullingRef.current = false
+          await pullNow(true)
+          return
+        } catch (pullErr) {
+          console.warn('Recuperação por pull após falha ao salvar (ADM)', pullErr)
+        }
+      }
       setSyncStatus('offline')
       setSyncError(msg)
       dirtyRef.current = true
@@ -209,11 +228,29 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
     if (!session || pullingRef.current || savingRef.current) return
     if (!force && Date.now() < skipPullUntilRef.current) return
 
-    // Contingência offline: sempre sobe o local sujo ANTES de baixar (senão perde venda em dinheiro)
+    // Contingência offline (membro): sobe o local sujo antes de baixar.
+    // ADM acompanhando vendas: se a nuvem já mudou, só baixa (evita "falha ao salvar" por conflito).
     if (dirtyRef.current) {
-      await pushNow()
-      if (dirtyRef.current) return
-      if (!force) return
+      if (session.role === 'admin') {
+        try {
+          const remoteTs = await peekWorkspaceUpdatedAt(session.workspace.accessCode)
+          if (isNewer(remoteTs, updatedAtRef.current)) {
+            dirtyRef.current = false
+          } else {
+            await pushNow()
+            if (dirtyRef.current) return
+            if (!force) return
+          }
+        } catch {
+          await pushNow()
+          if (dirtyRef.current) return
+          if (!force) return
+        }
+      } else {
+        await pushNow()
+        if (dirtyRef.current) return
+        if (!force) return
+      }
     }
 
     pullingRef.current = true
@@ -231,7 +268,7 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
 
       const opened =
         session.role === 'admin' && session.workspace.id
-          ? await fetchOwnerWorkspace(session.workspace.id)
+          ? await fetchOwnerWorkspace(session.workspace.id, session.workspace.accessCode)
           : await fetchByAccessCode(session.workspace.accessCode)
       if (force || isNewer(opened.meta.updatedAt, updatedAtRef.current)) {
         setSyncStatus('baixando')
@@ -284,7 +321,7 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
             } else {
               const local = snapshotFromStore()
               if (!emptyishState(local)) {
-                const updatedAt = await saveOwnerWorkspaceState(meta.id, local)
+                const updatedAt = await saveOwnerWorkspaceState(meta.id, local, meta.accessCode)
                 updatedAtRef.current = updatedAt
                 next.workspace.updatedAt = updatedAt
                 saveCloudSession(next)
@@ -353,11 +390,24 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, onError, onReady])
 
-  // Push local → nuvem
+  // Push explícito (ADM cadastra equipe/evento etc.)
+  useEffect(() => {
+    if (boot) return
+    const onPush = () => {
+      dirtyRef.current = true
+      void pushNow()
+    }
+    window.addEventListener('rifa-request-cloud-push', onPush)
+    return () => window.removeEventListener('rifa-request-cloud-push', onPush)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [boot])
+
+  // Push local → nuvem (membro vende; ADM só recebe via pull)
   useEffect(() => {
     if (boot) return
     const unsub = useStore.subscribe(() => {
       if (applyingRemoteRef.current) return
+      if (mode === 'admin') return
       dirtyRef.current = true
       setSyncStatus('salvando')
       if (pushTimerRef.current) window.clearTimeout(pushTimerRef.current)
@@ -370,7 +420,7 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
       if (pushTimerRef.current) window.clearTimeout(pushTimerRef.current)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [boot])
+  }, [boot, mode])
 
   // Sessão atualizada fora do bridge (ex.: após criar/baixar PIX no servidor)
   useEffect(() => {
@@ -431,6 +481,12 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
     channel.on('broadcast', { event: 'workspace_updated' }, (payload) => {
       const updatedAt = String((payload.payload as { updatedAt?: string } | undefined)?.updatedAt || '')
       if (updatedAt && !isNewer(updatedAt, updatedAtRef.current)) return
+      if (session.role === 'admin') {
+        if (savingRef.current) return
+        dirtyRef.current = false
+        void pullNow(true)
+        return
+      }
       if (dirtyRef.current || savingRef.current) {
         void pushNow().then(() => pullNow(true))
         return
@@ -456,7 +512,8 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
           }
           if (!row?.updated_at || !row.state) return
           if (!isNewer(row.updated_at, updatedAtRef.current)) return
-          if (dirtyRef.current || savingRef.current) return
+          if (savingRef.current) return
+          dirtyRef.current = false
           setSyncStatus('baixando')
           applyRemote(row.state, row.updated_at, {
             updatedAt: row.updated_at,

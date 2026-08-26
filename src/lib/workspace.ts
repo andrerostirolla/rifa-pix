@@ -89,16 +89,27 @@ export async function ensureOwnerWorkspace(name?: string): Promise<{ meta: Works
   return { meta: mapWorkspace(row), state }
 }
 
-export async function saveOwnerWorkspaceState(workspaceId: string, state: AppState): Promise<string> {
+/**
+ * ADM grava o workspace. A tabela passa por RLS, e ADM auxiliar (não dono) pode
+ * ficar sem permissão; nesse caso cai na RPC security definer pelo código da equipe.
+ */
+export async function saveOwnerWorkspaceState(
+  workspaceId: string,
+  state: AppState,
+  accessCode?: string,
+): Promise<string> {
   const sb = client()
   const { data, error } = await sb
     .from('workspaces')
     .update({ state, updated_at: new Date().toISOString() })
     .eq('id', workspaceId)
     .select('updated_at')
-    .single()
-  if (error) throw error
-  return data.updated_at as string
+    .maybeSingle()
+  if (!error && data?.updated_at) return data.updated_at as string
+  if (!accessCode) {
+    throw error || new Error('Sem permissão para gravar o workspace (RLS). Rode scripts/FIX-workspace-admin-rls.sql.')
+  }
+  return saveByAccessCode(accessCode, state)
 }
 
 export async function peekMembers(accessCode: string): Promise<{
@@ -167,10 +178,16 @@ export async function saveByAccessCode(
   return (data as { updatedAt: string }).updatedAt
 }
 
-export async function fetchOwnerWorkspace(workspaceId: string): Promise<{ meta: WorkspaceMeta; state: AppState }> {
+export async function fetchOwnerWorkspace(
+  workspaceId: string,
+  accessCode?: string,
+): Promise<{ meta: WorkspaceMeta; state: AppState }> {
   const sb = client()
-  const { data, error } = await sb.from('workspaces').select('*').eq('id', workspaceId).single()
-  if (error) throw error
+  const { data, error } = await sb.from('workspaces').select('*').eq('id', workspaceId).maybeSingle()
+  if (error || !data) {
+    if (accessCode) return fetchByAccessCode(accessCode)
+    throw error || new Error('Workspace não encontrado ou sem permissão de leitura (RLS).')
+  }
   const row = data as {
     id: string
     name: string
@@ -226,7 +243,7 @@ export async function flushWorkspaceToCloud(state: AppState): Promise<void> {
   try {
     let updatedAt: string
     if (session.role === 'admin' && session.workspace.id) {
-      updatedAt = await saveOwnerWorkspaceState(session.workspace.id, state)
+      updatedAt = await saveOwnerWorkspaceState(session.workspace.id, state, session.workspace.accessCode)
     } else {
       updatedAt = await saveByAccessCode(
         session.workspace.accessCode,
@@ -247,4 +264,9 @@ export async function flushWorkspaceToCloud(state: AppState): Promise<void> {
     }
     throw err
   }
+}
+
+/** ADM: pede gravação na nuvem sem reagir a cada pull/remoto no zustand. */
+export function requestCloudPush() {
+  window.dispatchEvent(new CustomEvent('rifa-request-cloud-push'))
 }

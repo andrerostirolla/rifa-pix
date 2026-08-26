@@ -18,6 +18,7 @@ import {
   type CloudSession,
 } from './lib/workspace'
 import { offloadEmbeddedProofs } from './lib/proofs'
+import { formatErr, translateAuthErr } from './lib/errors'
 import { useStore } from './store'
 import type { AppState } from './types'
 
@@ -253,6 +254,7 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
 
   useEffect(() => {
     let alive = true
+    const BOOT_MS = 20_000
     ;(async () => {
       try {
         const session = loadCloudSession()
@@ -262,49 +264,67 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
           return
         }
 
-        if (mode === 'admin' && session.role === 'admin') {
-          const { meta, state } = await ensureOwnerWorkspace(session.workspace.name)
-          const next: CloudSession = { role: 'admin', workspace: meta }
-          saveCloudSession(next)
-          sessionRef.current = next
-          updatedAtRef.current = meta.updatedAt
-          if (!emptyishState(state)) {
-            applyRemote(state!, meta.updatedAt, meta)
-          } else {
-            const local = snapshotFromStore()
-            if (!emptyishState(local)) {
-              const updatedAt = await saveOwnerWorkspaceState(meta.id, local)
-              updatedAtRef.current = updatedAt
-              next.workspace.updatedAt = updatedAt
-              saveCloudSession(next)
+        const bootWork = async () => {
+          if (mode === 'admin' && session.role === 'admin') {
+            const { meta, state } = await ensureOwnerWorkspace(session.workspace.name)
+            const next: CloudSession = { role: 'admin', workspace: meta }
+            saveCloudSession(next)
+            sessionRef.current = next
+            updatedAtRef.current = meta.updatedAt
+            if (!emptyishState(state)) {
+              applyRemote(state!, meta.updatedAt, meta)
+            } else {
+              const local = snapshotFromStore()
+              if (!emptyishState(local)) {
+                const updatedAt = await saveOwnerWorkspaceState(meta.id, local)
+                updatedAtRef.current = updatedAt
+                next.workspace.updatedAt = updatedAt
+                saveCloudSession(next)
+              }
             }
+            await loginAdminSession(meta.name || 'ADM')
+          } else if (mode === 'member' && session.role === 'member') {
+            const opened = await fetchByAccessCode(session.workspace.accessCode)
+            const next: CloudSession = {
+              role: 'member',
+              workspace: opened.meta,
+              memberId: session.memberId,
+              memberName: session.memberName,
+            }
+            saveCloudSession(next)
+            sessionRef.current = next
+            applyRemote(opened.state, opened.meta.updatedAt, opened.meta)
+            loginMemberSession(session.memberId, session.memberName)
+          } else {
+            throw new Error('Sessão inválida para este modo.')
           }
-          await loginAdminSession(meta.name || 'ADM')
-        } else if (mode === 'member' && session.role === 'member') {
-          const opened = await fetchByAccessCode(session.workspace.accessCode)
-          const next: CloudSession = {
-            role: 'member',
-            workspace: opened.meta,
-            memberId: session.memberId,
-            memberName: session.memberName,
+
+          // Migração de comprovantes não pode travar a entrada
+          try {
+            const { moved } = await Promise.race([
+              migrateProofsIfNeeded(snapshotFromStore()),
+              new Promise<{ moved: number }>((resolve) =>
+                window.setTimeout(() => resolve({ moved: 0 }), 8_000),
+              ),
+            ])
+            if (moved > 0) {
+              dirtyRef.current = true
+              await pushNow()
+            }
+          } catch (migErr) {
+            console.warn('Migração de comprovantes ignorada no boot', migErr)
           }
-          saveCloudSession(next)
-          sessionRef.current = next
-          applyRemote(opened.state, opened.meta.updatedAt, opened.meta)
-          loginMemberSession(session.memberId, session.memberName)
-        } else {
-          onError('Sessão inválida para este modo.')
-          return
         }
 
-        // Move comprovantes base64 antigos para o Storage e enxuga o JSON
-        if (alive) {
-          const { moved } = await migrateProofsIfNeeded(snapshotFromStore())
-          if (moved > 0) {
-            dirtyRef.current = true
-            await pushNow()
-          }
-        }
+        await Promise.race([
+          bootWork(),
+          new Promise((_, reject) =>
+            window.setTimeout(
+              () => reject(new Error('Tempo esgotado ao sincronizar. Verifique a internet e tente de novo.')),
+              BOOT_MS,
+            ),
+          ),
+        ])
 
         if (alive) {
           setBoot(false)
@@ -312,7 +332,7 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
           onReady()
         }
       } catch (err) {
-        if (alive) onError(err instanceof Error ? err.message : 'Falha ao abrir workspace')
+        if (alive) onError(translateAuthErr(formatErr(err, 'Falha ao abrir workspace')))
       }
     })()
     return () => {
@@ -451,6 +471,7 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
         <div className="auth-card panel">
           <p className="brand">RifaPIX</p>
           <p className="hint">Sincronizando com a nuvem…</p>
+          <p className="hint">Se travar mais de 20s, o app mostra o erro. Verifique a internet.</p>
         </div>
       </div>
     )

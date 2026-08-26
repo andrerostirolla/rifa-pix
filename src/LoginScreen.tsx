@@ -26,6 +26,7 @@ import {
   saveCloudSession,
   saveOwnerWorkspaceState,
 } from './lib/workspace'
+import { formatErr, translateAuthErr } from './lib/errors'
 import { InstallAppButton } from './InstallAppButton'
 import { useStore } from './store'
 
@@ -362,17 +363,11 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
         onLocalAuthenticated()
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Falha na autenticação.'
+      const msg = translateAuthErr(formatErr(err))
       if (/quota/i.test(msg)) {
         setError(
           'Armazenamento do Safari cheio. Em Ajustes → Safari → Avançado → Dados de sites, apague andrerostirolla.github.io e tente de novo. (Não dá para limpar isso remotamente.)',
         )
-      } else if (/invalid path/i.test(msg)) {
-        setError(
-          'URL do Auth inválida no Supabase. Em Authentication → URL Configuration, Site URL = https://andrerostirolla.github.io/rifa-pix/ e salve. Se você já tem conta, clique em “Já tenho conta” e use Entrar (não Criar conta).',
-        )
-      } else if (/already registered|user already/i.test(msg)) {
-        setError('Este e-mail já tem conta. Clique em “Já tenho conta” e use Entrar.')
       } else {
         setError(msg)
       }

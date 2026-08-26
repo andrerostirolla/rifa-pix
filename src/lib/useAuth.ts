@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { Session, User } from '@supabase/supabase-js'
 import { authRedirectTo, isSupabaseConfigured, supabase } from './supabase'
+import { formatErr, translateAuthErr } from './errors'
 
 export function useAuth() {
   const [session, setSession] = useState<Session | null>(null)
@@ -43,12 +44,12 @@ export function useAuth() {
             emailRedirectTo: authRedirectTo(),
           },
         })
-        if (error) throw error
+        if (error) throw new Error(translateAuthErr(formatErr(error)))
       },
       async signIn(email: string, password: string) {
         if (!supabase) throw new Error('Supabase não configurado')
         const { error } = await supabase.auth.signInWithPassword({ email, password })
-        if (error) throw error
+        if (error) throw new Error(translateAuthErr(formatErr(error)))
       },
       async signOut() {
         if (!supabase) return

@@ -65,7 +65,16 @@ function mapWorkspace(row: {
 export async function ensureOwnerWorkspace(name?: string): Promise<{ meta: WorkspaceMeta; state: AppState | null }> {
   const sb = client()
   const { data, error } = await sb.rpc('ensure_my_workspace', { p_name: name || 'RifaPIX' })
-  if (error) throw error
+  if (error) {
+    const msg = error.message || String(error)
+    if (/does not exist|workspace_admins/i.test(msg)) {
+      throw new Error(
+        'Migration pendente: rode supabase/migrations/20260826140000_workspace_admins_audit.sql no SQL Editor do Supabase.',
+      )
+    }
+    throw new Error(msg)
+  }
+  if (!data) throw new Error('Workspace vazio retornado pelo servidor.')
   const row = data as {
     id: string
     name: string

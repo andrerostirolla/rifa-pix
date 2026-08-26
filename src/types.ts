@@ -78,6 +78,9 @@ export interface Sale {
   proofPath?: string
   /** Legado: data URL embutida (migrar para proofPath) */
   proofImageDataUrl?: string
+  /** Prestação de contas em dinheiro liquidada com a entidade */
+  cashSettledAt?: string
+  cashSettlementNote?: string
 }
 
 /** Rastro de atribuição / transferência / liberação de bloco */
@@ -124,6 +127,10 @@ export interface PixCharge {
   paidAt?: string
   note?: string
   proofImageDataUrl?: string
+  copyPaste?: string
+  qrCode?: string
+  provider?: string
+  expiresAt?: string
 }
 
 export interface MemberSettlement {
@@ -134,6 +141,16 @@ export interface MemberSettlement {
   kind: 'dinheiro' | 'pix_vendedor'
   note?: string
   createdAt: string
+  /** Vendas em dinheiro liquidadas neste fechamento */
+  saleIds?: string[]
+}
+
+export interface AuditEntry {
+  id: string
+  at: string
+  actorName: string
+  action: string
+  detail?: string
 }
 
 export interface AppState {
@@ -147,4 +164,5 @@ export interface AppState {
   pixCharges: PixCharge[]
   memberSettlements: MemberSettlement[]
   blockTransfers: BlockTransfer[]
+  auditLog?: AuditEntry[]
 }

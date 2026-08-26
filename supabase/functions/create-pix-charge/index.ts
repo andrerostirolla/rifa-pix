@@ -1,4 +1,6 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.49.1'
+import { sicoobCreateCob } from '../_shared/sicoob.ts'
+import { buildMockPixCopiaECola } from '../_shared/emv.ts'
 
 const cors = {
   'Access-Control-Allow-Origin': '*',
@@ -13,13 +15,14 @@ function json(body: unknown, status = 200) {
 }
 
 function makeTxid() {
+  // Bacen cob dinamica: txid [a-zA-Z0-9]{26,35}
   const raw = crypto.randomUUID().replace(/-/g, '')
-  return `rifa${raw}`.slice(0, 25)
+  return `rifa${raw}`.slice(0, 32)
 }
 
 function mockBrCode(amount: number, txid: string) {
-  // Placeholder EMV-like payload for demo/QR rendering in UI.
-  return `00020126580014BR.GOV.BCB.PIX0136${txid}520400005303986540${amount.toFixed(2)}5802BR5925RIFAPIX DEMO6009SAO PAULO62070503***6304ABCD`
+  const pixKey = (Deno.env.get('SICOOB_PIX_KEY') || '').trim() || '00000000000'
+  return buildMockPixCopiaECola(amount, txid, pixKey)
 }
 
 Deno.serve(async (req) => {
@@ -67,11 +70,22 @@ Deno.serve(async (req) => {
     }
 
     const txid = makeTxid()
-    const copyPaste = mockBrCode(amount, txid)
     const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString()
+    const provider = (Deno.env.get('PIX_PROVIDER') || 'mock').toLowerCase()
 
-    // Provider hook: if EFI/ASAAS secrets exist, create real charge here.
-    const provider = Deno.env.get('PIX_PROVIDER') || 'mock'
+    let copyPaste = mockBrCode(amount, txid)
+    let qrCode = copyPaste
+
+    if (provider === 'sicoob') {
+      const cob = await sicoobCreateCob({
+        txid,
+        amount,
+        description: `RifaPIX venda ${saleId}`,
+        expiresSeconds: 1800,
+      })
+      copyPaste = cob.copyPaste
+      qrCode = cob.qrCode
+    }
 
     const { data: charge, error: chargeError } = await admin
       .from('pix_charges')
@@ -82,8 +96,9 @@ Deno.serve(async (req) => {
         amount,
         status: 'pending',
         copy_paste: copyPaste,
-        qr_code: copyPaste,
+        qr_code: qrCode,
         provider,
+        provider_charge_id: provider === 'sicoob' ? txid : null,
         expires_at: expiresAt,
       })
       .select('*')

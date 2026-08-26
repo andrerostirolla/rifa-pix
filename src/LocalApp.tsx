@@ -1,18 +1,25 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { getAuthRecord, getSession, logout } from './auth'
-import { parsePixCsv, SAMPLE_CSV } from './csvImport'
+import { getAuthRecord, getSession, logout, verifyAdminPassword } from './auth'
 import { NumberGrid } from './NumberGrid'
 import { isSupabaseConfigured, supabase } from './lib/supabase'
 import { openProofUrl, resolveProofUrl, uploadProofFile } from './lib/proofs'
-import { loadCloudSession, saveCloudSession } from './lib/workspace'
+import { loadCloudSession, saveCloudSession, flushWorkspaceToCloud, fetchByAccessCode, syncCloudSessionMeta } from './lib/workspace'
+import {
+  createWorkspacePixCharge,
+  checkWorkspacePixCharge,
+  listWorkspacePixCharges,
+  getStoredMemberPin,
+} from './lib/pixWorkspace'
+import { createWorkspaceAdmin, logAudit } from './lib/audit'
+import { useCloudSync } from './lib/cloudSyncContext'
+import { PixChargeModal } from './PixChargeModal'
 import { brl, formatNumbers, useStore } from './store'
 import { TeamChat } from './TeamChat'
 import { InstallAppButton } from './InstallAppButton'
-import { previewTxidMatches } from './txidMatch'
 import type { CashDestination, PaymentMethod, PaymentStatus, PixDestination } from './types'
 
-type AdminTab = 'painel' | 'equipe' | 'transferencias' | 'eventos' | 'vendas' | 'pix' | 'txid' | 'amortizacao' | 'relatorios'
+type AdminTab = 'painel' | 'equipe' | 'transferencias' | 'eventos' | 'vendas' | 'txid' | 'amortizacao' | 'relatorios'
 type MemberTab = 'blocos' | 'vendas'
 
 const statusLabel: Record<PaymentStatus, string> = {
@@ -20,6 +27,39 @@ const statusLabel: Record<PaymentStatus, string> = {
   parcial: 'Parcial',
   quitado: 'Quitado',
   divergente: 'Divergente',
+}
+
+function askProceed(message = 'Tem certeza que deseja prosseguir com essa operação?') {
+  return window.confirm(message)
+}
+
+function isCashPending(s: { paymentMethod: string; cashDestination?: string; cashSettledAt?: string }) {
+  return (
+    s.paymentMethod === 'dinheiro' &&
+    (s.cashDestination || 'vendedor') === 'vendedor' &&
+    !s.cashSettledAt
+  )
+}
+
+function saleUiStatus(
+  s: {
+    id: string
+    status: PaymentStatus
+    paymentMethod: string
+    cashDestination?: string
+    cashSettledAt?: string
+  },
+  charges: Array<{ saleId: string; status: string }>,
+): 'quitado' | 'pendente' | 'falha' {
+  const charge = charges.find((c) => c.saleId === s.id)
+  if (s.status === 'divergente' || charge?.status === 'expired' || charge?.status === 'cancelled') return 'falha'
+  if (s.paymentMethod === 'dinheiro') {
+    if ((s.cashDestination || 'vendedor') === 'loja' || s.cashSettledAt) return 'quitado'
+    return 'pendente'
+  }
+  if (s.status === 'quitado' || charge?.status === 'paid') return 'quitado'
+  if (s.status === 'parcial') return 'falha'
+  return 'pendente'
 }
 
 function ProofIcon() {
@@ -59,6 +99,9 @@ export default function LocalApp() {
   const session = getSession()
   const isAdmin = session?.role === 'admin'
   const memberId = session?.memberId || ''
+  const { cloudOk } = useCloudSync()
+  /** Sem nuvem: contingência — só dinheiro local; PIX bloqueado */
+  const offlineContingency = isSupabaseConfigured && !cloudOk
 
   const [adminTab, setAdminTab] = useState<AdminTab>('painel')
   const [memberTab, setMemberTab] = useState<MemberTab>('blocos')
@@ -68,18 +111,33 @@ export default function LocalApp() {
   const [pixDestination, setPixDestination] = useState<PixDestination>('entidade')
   const [cashDestination, setCashDestination] = useState<CashDestination>('vendedor')
   const [saleRaffleId, setSaleRaffleId] = useState('')
+  const [assignBlockIds, setAssignBlockIds] = useState<string[]>([])
+  const [transferBlockIds, setTransferBlockIds] = useState<string[]>([])
+  const [baixaMemberId, setBaixaMemberId] = useState('')
+  const [baixaSelectedIds, setBaixaSelectedIds] = useState<string[]>([])
+  const [settlingBaixa, setSettlingBaixa] = useState(false)
+  const [fullAccess, setFullAccess] = useState(false)
   const [openBlockId, setOpenBlockId] = useState<string | null>(null)
   const [openEventId, setOpenEventId] = useState<string | null>(null)
   const [filterEventId, setFilterEventId] = useState('')
-  const [assignBlockId, setAssignBlockId] = useState('')
-  const [transferBlockId, setTransferBlockId] = useState('')
   const [transferEventId, setTransferEventId] = useState('')
   const [proofDataUrl, setProofDataUrl] = useState('')
+  const [pixModal, setPixModal] = useState<{
+    buyerName: string
+    amount: number
+    copyPaste: string
+    txid: string
+    saleId?: string
+    isDemo?: boolean
+    expiresAt?: string
+  } | null>(null)
+  const [checkingPix, setCheckingPix] = useState(false)
+  const [pixPaid, setPixPaid] = useState(false)
+  const [savingSale, setSavingSale] = useState(false)
   const [reportMemberId, setReportMemberId] = useState('')
   const [reportEventId, setReportEventId] = useState('')
   const [reportDetail, setReportDetail] = useState<'resumo' | 'vendas' | 'blocos' | 'baixas' | 'movimentos'>('resumo')
-  const [csvText, setCsvText] = useState('')
-  const [importPreview, setImportPreview] = useState<ReturnType<typeof parsePixCsv> | null>(null)
+  const pixCheckLock = useRef(false)
 
   const raffles = useStore((s) => s.raffles)
   const members = useStore((s) => s.members)
@@ -90,6 +148,7 @@ export default function LocalApp() {
   const pixCharges = useStore((s) => s.pixCharges)
   const memberSettlements = useStore((s) => s.memberSettlements)
   const blockTransfers = useStore((s) => s.blockTransfers)
+  const auditLog = useStore((s) => s.auditLog)
   const addRaffle = useStore((s) => s.addRaffle)
   const removeRaffle = useStore((s) => s.removeRaffle)
   const addMember = useStore((s) => s.addMember)
@@ -102,10 +161,13 @@ export default function LocalApp() {
   const blockStats = useStore((s) => s.blockStats)
   const memberBlockStats = useStore((s) => s.memberBlockStats)
   const addSale = useStore((s) => s.addSale)
-  const importCsvAndSettleByTxid = useStore((s) => s.importCsvAndSettleByTxid)
+  const removeSale = useStore((s) => s.removeSale)
+  const settlePixChargeByTxid = useStore((s) => s.settlePixChargeByTxid)
+  const registerPixCharge = useStore((s) => s.registerPixCharge)
+  const createChargeForSale = useStore((s) => s.createChargeForSale)
   const amortize = useStore((s) => s.amortize)
   const autoMatchSuggestions = useStore((s) => s.autoMatchSuggestions)
-  const addMemberSettlement = useStore((s) => s.addMemberSettlement)
+  const settleCashSales = useStore((s) => s.settleCashSales)
   const seedDemo = useStore((s) => s.seedDemo)
   const resetAll = useStore((s) => s.resetAll)
 
@@ -136,14 +198,6 @@ export default function LocalApp() {
 
   const suggestions = useMemo(() => autoMatchSuggestions(), [sales, pixPayments, pixCharges, amortizations, autoMatchSuggestions])
 
-  const txidPreview = useMemo(() => {
-    if (!importPreview?.rows.length) return []
-    return previewTxidMatches(
-      importPreview.rows,
-      pixCharges.map((c) => ({ id: c.id, saleId: c.saleId, txid: c.txid, amount: c.amount, status: c.status })),
-    )
-  }, [importPreview, pixCharges])
-
   const reports = useMemo(() => {
     return members
       .filter((m) => m.active)
@@ -157,33 +211,52 @@ export default function LocalApp() {
         const openAmount = Math.max(0, expected - received)
         const cashVendedor = mSales
           .filter((s) => s.paymentMethod === 'dinheiro' && (s.cashDestination || 'vendedor') === 'vendedor')
-          .reduce((acc, s) => acc + s.paidAmount, 0)
+          .reduce((acc, s) => acc + s.totalAmount, 0)
         const cashLoja = mSales
           .filter((s) => s.paymentMethod === 'dinheiro' && s.cashDestination === 'loja')
-          .reduce((acc, s) => acc + s.paidAmount, 0)
+          .reduce((acc, s) => acc + s.totalAmount, 0)
         const pixEntidade = mSales
-          .filter((s) => s.paymentMethod === 'pix' && s.pixDestination === 'entidade')
-          .reduce((acc, s) => acc + s.paidAmount, 0)
+          .filter((s) => s.paymentMethod === 'pix' && (s.pixDestination || 'entidade') === 'entidade')
+          .reduce((acc, s) => acc + (s.status === 'quitado' ? s.paidAmount || s.totalAmount : 0), 0)
         const pixVendedor = mSales
           .filter((s) => s.paymentMethod === 'pix' && s.pixDestination === 'vendedor')
           .reduce((acc, s) => acc + s.paidAmount, 0)
-        const settlements = memberSettlements.filter((x) => x.memberId === m.id)
-        const settledCash = settlements.filter((x) => x.kind === 'dinheiro').reduce((a, x) => a + x.amount, 0)
+        const cashPendingSales = mSales.filter((s) => isCashPending(s))
+        const cashSettledSales = mSales.filter(
+          (s) =>
+            s.paymentMethod === 'dinheiro' &&
+            (s.cashDestination || 'vendedor') === 'vendedor' &&
+            Boolean(s.cashSettledAt),
+        )
+        const settlements = memberSettlements.filter(
+          (x) =>
+            x.memberId === m.id && (!reportEventId || !x.raffleId || x.raffleId === reportEventId),
+        )
+        const settledCash = cashSettledSales.reduce((a, s) => a + s.totalAmount, 0)
         const settledPix = settlements.filter((x) => x.kind === 'pix_vendedor').reduce((a, x) => a + x.amount, 0)
+        const cashOpen = Math.max(0, Math.round(cashPendingSales.reduce((a, s) => a + s.totalAmount, 0) * 100) / 100)
+        const pixSalesAmount = mSales.filter((s) => s.paymentMethod === 'pix').reduce((a, s) => a + s.totalAmount, 0)
+        const cashSalesAmount = mSales.filter((s) => s.paymentMethod === 'dinheiro').reduce((a, s) => a + s.totalAmount, 0)
+        const ticketPrice =
+          (reportEventId
+            ? raffles.find((r) => r.id === reportEventId)?.ticketPrice
+            : raffles.find((r) => mSales.some((s) => s.raffleId === r.id))?.ticketPrice) || 0
+        const uiCounts = { quitado: 0, pendente: 0, falha: 0 }
+        for (const s of mSales) uiCounts[saleUiStatus(s, pixCharges)] += 1
+        const dinheiroNaLoja = Math.round((cashLoja + pixEntidade + settledCash) * 100) / 100
         const byStatus = {
-          quitado: mSales.filter((s) => s.status === 'quitado').length,
-          pendente: mSales.filter((s) => s.status === 'pendente').length,
+          quitado: uiCounts.quitado,
+          pendente: uiCounts.pendente,
           parcial: mSales.filter((s) => s.status === 'parcial').length,
           divergente: mSales.filter((s) => s.status === 'divergente').length,
+          falha: uiCounts.falha,
         }
         const withProof = mSales.filter((s) => Boolean(proofUrlForSale(s, pixCharges))).length
-        // Prestações são globais; com filtro de evento mostramos o bruto do período
-        const cashOpen = reportEventId ? cashVendedor : Math.max(0, cashVendedor - settledCash)
-        const pixVendedorOpen = reportEventId ? pixVendedor : Math.max(0, pixVendedor - settledPix)
-        const toEntity = cashLoja + pixEntidade + (reportEventId ? 0 : settledCash + settledPix)
+        const pixVendedorOpen = Math.max(0, Math.round((pixVendedor - settledPix) * 100) / 100)
         return {
           member: m,
           mSales,
+          cashPendingSales,
           settlements,
           saleCount,
           soldCount,
@@ -198,14 +271,18 @@ export default function LocalApp() {
           settledPix,
           cashOpen,
           pixVendedorOpen,
-          toEntity,
+          toEntity: dinheiroNaLoja,
+          dinheiroNaLoja,
+          pixSalesAmount,
+          cashSalesAmount,
+          ticketPrice,
           byStatus,
           withProof,
-          dueTotal: cashOpen + pixVendedorOpen,
+          dueTotal: cashOpen,
         }
       })
       .sort((a, b) => b.dueTotal - a.dueTotal || b.expected - a.expected || a.member.name.localeCompare(b.member.name))
-  }, [members, sales, memberSettlements, reportEventId, pixCharges])
+  }, [members, sales, memberSettlements, reportEventId, pixCharges, raffles])
 
   const totals = useMemo(() => {
     return reports.reduce(
@@ -239,6 +316,26 @@ export default function LocalApp() {
     [reports, reportMemberId],
   )
 
+  const baixaPendingSales = useMemo(() => {
+    if (!baixaMemberId) return []
+    return sales
+      .filter((s) => s.memberId === baixaMemberId && isCashPending(s))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+  }, [sales, baixaMemberId])
+
+  const baixaOpenTotal = useMemo(
+    () => Math.round(baixaPendingSales.reduce((a, s) => a + s.totalAmount, 0) * 100) / 100,
+    [baixaPendingSales],
+  )
+
+  const baixaQuitTotal = useMemo(
+    () =>
+      Math.round(
+        baixaPendingSales.filter((s) => baixaSelectedIds.includes(s.id)).reduce((a, s) => a + s.totalAmount, 0) * 100,
+      ) / 100,
+    [baixaPendingSales, baixaSelectedIds],
+  )
+
   const who = isAdmin
     ? getAuthRecord()?.organizerName || session?.memberName || 'ADM'
     : session?.memberName || 'Membro'
@@ -247,14 +344,38 @@ export default function LocalApp() {
     setSelectedNumbers((prev) => (prev.includes(n) ? prev.filter((x) => x !== n) : [...prev, n].sort((a, b) => a - b)))
   }
 
+  // Sem rede: força dinheiro (PIX precisa da nuvem/Sicoob)
+  useEffect(() => {
+    if (offlineContingency && paymentMethod === 'pix') {
+      setPaymentMethod('dinheiro')
+    }
+  }, [offlineContingency, paymentMethod])
+
   const onCreateSale = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault()
     if (!memberId && !isAdmin) return
-    const fd = new FormData(e.currentTarget)
+    if (savingSale) return
+    if (isSupabaseConfigured && !cloudOk && paymentMethod === 'pix') {
+      showToast('Sem nuvem — PIX bloqueado. Use dinheiro (contingência) ou reconecte.')
+      return
+    }
+    if (pixModal && !pixPaid) {
+      showToast('Finalize ou cancele o PIX em aberto antes de lançar outra venda.')
+      return
+    }
+    const formEl = e.currentTarget
+    const fd = new FormData(formEl)
     const sellerId = isAdmin ? String(fd.get('memberId') || '') : memberId
     const raffleId = String(fd.get('raffleId') || currentRaffleId)
-    const file = (e.currentTarget.elements.namedItem('proofFile') as HTMLInputElement | null)?.files?.[0]
-    const cloudReady = isSupabaseConfigured && Boolean(loadCloudSession()?.workspace.id)
+    const buyerName = String(fd.get('buyerName') || '').trim()
+    const memberPix = !isAdmin && paymentMethod === 'pix'
+    const memberCash = !isAdmin && paymentMethod === 'dinheiro'
+    const resolvedPixDest: PixDestination = isAdmin && paymentMethod === 'pix' ? pixDestination : 'entidade'
+    const resolvedCashDest: CashDestination = isAdmin && paymentMethod === 'dinheiro' ? cashDestination : 'vendedor'
+
+    const file = (formEl.elements.namedItem('proofFile') as HTMLInputElement | null)?.files?.[0]
+    const cloudSession = loadCloudSession()
+    const cloudReady = isSupabaseConfigured && Boolean(cloudSession?.workspace.id)
 
     let proofPath: string | undefined
     let proofImageDataUrl: string | undefined
@@ -271,30 +392,346 @@ export default function LocalApp() {
       }
     }
 
-    const result = addSale({
-      raffleId,
-      memberId: sellerId,
-      buyerName: String(fd.get('buyerName') || ''),
-      buyerPhone: String(fd.get('buyerPhone') || ''),
-      numbers: selectedNumbers,
-      paymentMethod,
-      pixDestination: paymentMethod === 'pix' ? pixDestination : undefined,
-      cashDestination: paymentMethod === 'dinheiro' ? cashDestination : undefined,
-      notes: String(fd.get('notes') || ''),
-      proofTxid: String(fd.get('proofTxid') || ''),
-      proofPath,
-      proofImageDataUrl,
-      receivedNow: paymentMethod === 'dinheiro' || String(fd.get('receivedNow') || '') === 'sim',
-      blockId: openBlockId || undefined,
-    })
-    if (!result.ok) return showToast(result.error)
-    e.currentTarget.reset()
+    const ticketPrice = activeRaffles.find((r) => r.id === currentRaffleId)?.ticketPrice || 0
+    const totalAmount = selectedNumbers.length * ticketPrice
+    if (!(totalAmount > 0) || !selectedNumbers.length) {
+      return showToast('Selecione ao menos um número.')
+    }
+
+    setSavingSale(true)
+    let createdSaleId: string | null = null
+    try {
+      const notesRaw = String(fd.get('notes') || '').trim()
+      const notes =
+        offlineContingency && paymentMethod === 'dinheiro'
+          ? [notesRaw, '[Contingência offline — sincroniza ao voltar a rede]'].filter(Boolean).join(' ')
+          : notesRaw
+
+      const result = addSale({
+        raffleId,
+        memberId: sellerId,
+        buyerName,
+        buyerPhone: String(fd.get('buyerPhone') || ''),
+        numbers: selectedNumbers,
+        paymentMethod,
+        pixDestination: paymentMethod === 'pix' ? resolvedPixDest : undefined,
+        cashDestination: paymentMethod === 'dinheiro' ? resolvedCashDest : undefined,
+        notes,
+        proofTxid: memberPix ? '' : String(fd.get('proofTxid') || ''),
+        proofPath,
+        proofImageDataUrl,
+        receivedNow:
+          memberCash ||
+          (isAdmin && paymentMethod === 'dinheiro') ||
+          (isAdmin && paymentMethod === 'pix' && String(fd.get('receivedNow') || '') === 'sim'),
+        blockId: openBlockId || undefined,
+      })
+      if (!result.ok) return showToast(result.error)
+      createdSaleId = result.sale.id
+
+      if (memberPix || (isAdmin && paymentMethod === 'pix' && String(fd.get('receivedNow') || '') !== 'sim')) {
+        let chargeCopy = ''
+        let chargeTxid = ''
+        let isDemo = true
+        let expiresAt: string | undefined
+
+        if (cloudReady && cloudSession?.role === 'member') {
+          let pin = getStoredMemberPin(sellerId)
+          if (!pin) {
+            pin = window.prompt('Digite seu PIN para gerar o PIX da loja:')?.trim() || ''
+            if (!pin) {
+              removeSale(result.sale.id)
+              showToast('PIX cancelado — venda não foi lançada. Informe o PIN para gerar o QR.')
+              return
+            }
+          }
+          try {
+            await flushWorkspaceToCloud(useStore.getState().exportSnapshot())
+          } catch (syncErr) {
+            console.warn('Sync antes do PIX falhou; seguindo com sale no body', syncErr)
+          }
+          try {
+            const remote = await createWorkspacePixCharge({
+              accessCode: cloudSession.workspace.accessCode,
+              memberId: sellerId,
+              pin,
+              saleId: result.sale.id,
+              amount: totalAmount,
+              buyerName,
+              sale: result.sale,
+            })
+            isDemo = remote.provider !== 'sicoob'
+            expiresAt = remote.expiresAt
+            try {
+              const opened = await fetchByAccessCode(cloudSession.workspace.accessCode)
+              useStore.getState().importSnapshot(opened.state)
+              syncCloudSessionMeta(opened.meta)
+            } catch {
+              registerPixCharge({
+                id: remote.id,
+                saleId: result.sale.id,
+                txid: remote.txid,
+                amount: remote.amount,
+                copyPaste: remote.copyPaste,
+                qrCode: remote.qrCode,
+                provider: remote.provider,
+                expiresAt: remote.expiresAt,
+              })
+            }
+            chargeCopy = remote.copyPaste
+            chargeTxid = remote.txid
+          } catch (pixErr) {
+            removeSale(result.sale.id)
+            createdSaleId = null
+            try {
+              await flushWorkspaceToCloud(useStore.getState().exportSnapshot())
+            } catch {
+              /* ignore */
+            }
+            showToast(pixErr instanceof Error ? pixErr.message : 'Erro ao gerar PIX — venda não lançada.')
+            return
+          }
+        } else {
+          const local = createChargeForSale(result.sale.id, totalAmount)
+          if (local.ok) {
+            chargeCopy = local.charge.copyPaste || local.charge.txid
+            chargeTxid = local.charge.txid
+            expiresAt = local.charge.expiresAt
+          } else {
+            removeSale(result.sale.id)
+            showToast(local.error || 'Não foi possível gerar PIX.')
+            return
+          }
+        }
+
+        if (!chargeCopy) {
+          removeSale(result.sale.id)
+          showToast('Não foi possível gerar o QR do PIX — venda não lançada.')
+          return
+        }
+
+        setPixPaid(false)
+        setPixModal({
+          buyerName,
+          amount: totalAmount,
+          copyPaste: chargeCopy,
+          txid: chargeTxid,
+          saleId: result.sale.id,
+          isDemo,
+          expiresAt:
+            expiresAt || new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+        })
+        // Mantém a tela de venda aberta até pagar ou cancelar
+        return
+      }
+
+      formEl.reset()
+      setSelectedNumbers([])
+      setPaymentMethod('dinheiro')
+      setCashDestination('vendedor')
+      setPixDestination('entidade')
+      setProofDataUrl('')
+
+      if (memberCash) {
+        if (offlineContingency) {
+          showToast('Contingência: venda em dinheiro salva neste celular. Sobe pra nuvem quando a rede voltar.')
+          logAudit('venda.contingencia', `${buyerName} · ${brl(totalAmount)}`)
+        } else {
+          showToast('Venda em dinheiro registrada. Ficou com você — preste contas à entidade.')
+          logAudit('venda.dinheiro', `${buyerName} · ${brl(totalAmount)}`)
+        }
+      } else {
+        showToast(proofPath ? 'Venda registrada (comprovante na nuvem).' : 'Venda registrada.')
+        logAudit('venda.registrar', `${buyerName} · ${brl(totalAmount)}`)
+      }
+    } catch (err) {
+      if (createdSaleId && memberPix) {
+        removeSale(createdSaleId)
+      }
+      showToast(err instanceof Error ? err.message : 'Erro ao salvar venda')
+    } finally {
+      setSavingSale(false)
+    }
+  }
+
+  const cancelPendingPixSale = async () => {
+    const saleId = pixModal?.saleId
+    setPixModal(null)
+    setPixPaid(false)
+    if (saleId) {
+      removeSale(saleId)
+      try {
+        await flushWorkspaceToCloud(useStore.getState().exportSnapshot())
+      } catch {
+        /* ignore */
+      }
+      showToast('PIX cancelado — venda não efetivada. Números liberados.')
+    }
+  }
+
+  const finishPaidPixSale = () => {
+    const buyer = pixModal?.buyerName
+    const amount = pixModal?.amount
+    setPixModal(null)
+    setPixPaid(false)
     setSelectedNumbers([])
     setPaymentMethod('dinheiro')
-    setCashDestination('vendedor')
     setProofDataUrl('')
-    showToast(proofPath ? 'Venda registrada (comprovante na nuvem).' : 'Venda registrada.')
+    if (buyer && amount != null) {
+      showToast(`Venda PIX para ${buyer} no valor ${brl(amount)} recebida com sucesso.`)
+      logAudit('venda.pix', `${buyer} · ${brl(amount)}`)
+    }
   }
+
+  const verifyPixPayment = async (txid: string, saleId?: string, opts?: { silent?: boolean }) => {
+    const silent = Boolean(opts?.silent)
+    const cloudSession = loadCloudSession()
+    if (!cloudSession || cloudSession.role !== 'member') {
+      if (!silent) showToast('Verificação PIX só funciona com sessão de membro na nuvem.')
+      return
+    }
+    if (pixCheckLock.current) return
+    const sellerId = memberId || cloudSession.memberId
+    let pin = getStoredMemberPin(sellerId)
+    if (!pin) {
+      if (silent) return
+      pin = window.prompt('Digite seu PIN para consultar o pagamento:')?.trim() || ''
+      if (!pin) return
+    }
+    pixCheckLock.current = true
+    setCheckingPix(true)
+    try {
+      const result = await checkWorkspacePixCharge({
+        accessCode: cloudSession.workspace.accessCode,
+        memberId: sellerId,
+        pin,
+        txid,
+      })
+      if (result.status === 'paid') {
+        settlePixChargeByTxid(txid, result.amount, result.saleId || saleId)
+        try {
+          const remote = await fetchByAccessCode(cloudSession.workspace.accessCode)
+          useStore.getState().importSnapshot(remote.state)
+          syncCloudSessionMeta(remote.meta)
+        } catch {
+          /* local já quitado */
+        }
+        setPixPaid(true)
+        // Com modal aberto a mensagem fica na tela de sucesso; fora dela, toast na lista
+        if (!pixModal) {
+          const name =
+            sales.find((s) => s.id === (result.saleId || saleId))?.buyerName || 'comprador'
+          const value = result.amount ?? 0
+          showToast(`Venda PIX para ${name} no valor ${brl(value)} recebida com sucesso.`)
+        }
+        return
+      }
+      if (!silent) showToast(result.message || `Ainda pendente no Sicoob (${result.status}).`)
+    } catch (err) {
+      if (!silent) showToast(err instanceof Error ? err.message : 'Falha ao verificar PIX')
+    } finally {
+      pixCheckLock.current = false
+      setCheckingPix(false)
+    }
+  }
+
+  const syncPixChargesFromCloud = async () => {
+    const cloudSession = loadCloudSession()
+    if (!cloudSession?.workspace.accessCode || !isSupabaseConfigured) return
+    try {
+      const remote = await listWorkspacePixCharges(cloudSession.workspace.accessCode)
+      if (!remote.length) return
+      useStore.setState((s) => {
+        const byTxid = new Map(s.pixCharges.map((c) => [c.txid.toLowerCase(), c]))
+        for (const r of remote) {
+          const key = String(r.txid || '').toLowerCase()
+          if (!key) continue
+          const prev = byTxid.get(key)
+          const status = r.status === 'paid' ? ('paid' as const) : ('pending' as const)
+          byTxid.set(key, {
+            id: prev?.id || r.id,
+            saleId: r.saleId || prev?.saleId || '',
+            txid: r.txid,
+            amount: Number(r.amount),
+            status,
+            createdAt: r.createdAt || prev?.createdAt || new Date().toISOString(),
+            paidAt: r.paidAt || prev?.paidAt,
+            copyPaste: r.copyPaste || prev?.copyPaste,
+            qrCode: r.copyPaste || prev?.qrCode,
+            provider: r.provider || prev?.provider,
+            expiresAt: r.expiresAt || prev?.expiresAt,
+          })
+          if (status === 'paid' && r.saleId) {
+            const sale = s.sales.find((x) => x.id === r.saleId)
+            if (sale && sale.status !== 'quitado') {
+              // será ajustado abaixo via settle — aqui só merge charges
+            }
+          }
+        }
+        let salesNext = s.sales
+        for (const r of remote) {
+          if (r.status !== 'paid' || !r.saleId) continue
+          salesNext = salesNext.map((sale) => {
+            if (sale.id !== r.saleId || sale.status === 'quitado') return sale
+            const paidAmount = Math.min(sale.totalAmount, Math.max(sale.paidAmount, Number(r.amount) || sale.totalAmount))
+            const status: PaymentStatus =
+              paidAmount + 0.001 >= sale.totalAmount ? 'quitado' : paidAmount > 0 ? 'parcial' : 'pendente'
+            return { ...sale, paidAmount, status }
+          })
+        }
+        return { pixCharges: [...byTxid.values()], sales: salesNext }
+      })
+    } catch (err) {
+      console.warn('Falha ao listar TXIDs na nuvem', err)
+    }
+  }
+
+  useEffect(() => {
+    if (!pixModal || pixModal.isDemo || !pixModal.txid || pixPaid) return
+    void verifyPixPayment(pixModal.txid, pixModal.saleId, { silent: true })
+    const id = window.setInterval(() => {
+      void verifyPixPayment(pixModal.txid, pixModal.saleId, { silent: true })
+    }, 1000)
+    return () => window.clearInterval(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pixModal?.txid, pixModal?.saleId, pixModal?.isDemo, pixPaid])
+
+  // Se a nuvem/webhook já quitou a venda, fecha o aguardo sem botão manual
+  useEffect(() => {
+    if (!pixModal?.saleId || pixPaid) return
+    const sale = sales.find((s) => s.id === pixModal.saleId)
+    const charge = pixCharges.find((c) => c.saleId === pixModal.saleId && c.status === 'paid')
+    if (sale?.status === 'quitado' || charge) setPixPaid(true)
+  }, [pixModal?.saleId, pixPaid, sales, pixCharges])
+
+  // Pendentes na lista: consulta automática sem botão
+  useEffect(() => {
+    if (isAdmin || pixModal) return
+    const pending = sales.filter(
+      (s) =>
+        s.memberId === memberId &&
+        s.paymentMethod === 'pix' &&
+        s.status === 'pendente' &&
+        pixCharges.some((c) => c.saleId === s.id && c.status === 'pending' && c.txid),
+    )
+    if (!pending.length) return
+    const tick = () => {
+      for (const s of pending) {
+        const c = pixCharges.find((x) => x.saleId === s.id && x.txid)
+        if (c?.txid) void verifyPixPayment(c.txid, s.id, { silent: true })
+      }
+    }
+    tick()
+    const id = window.setInterval(tick, 1500)
+    return () => window.clearInterval(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAdmin, pixModal, sales, pixCharges, memberId])
+
+  useEffect(() => {
+    if (!isAdmin || adminTab !== 'txid') return
+    void syncPixChargesFromCloud()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAdmin, adminTab])
 
   if (!session) {
     return (
@@ -329,7 +766,6 @@ export default function LocalApp() {
                       ['transferencias', 'Transferências', 'Transf.'],
                       ['eventos', 'Eventos', 'Eventos'],
                       ['vendas', 'Vendas', 'Vendas'],
-                      ['pix', 'PIX/CSV', 'PIX'],
                       ['txid', 'TXID', 'TXID'],
                       ['amortizacao', 'Baixas', 'Baixas'],
                       ['relatorios', 'Relatórios', 'Relat.'],
@@ -354,8 +790,24 @@ export default function LocalApp() {
                     <button
                       key={id}
                       type="button"
-                      className={memberTab === id ? 'active' : ''}
-                      onClick={() => setMemberTab(id)}
+                      className={
+                        id === 'blocos'
+                          ? memberTab === 'blocos' && !openBlock
+                            ? 'active'
+                            : ''
+                          : memberTab === id || (id === 'vendas' && openBlock)
+                            ? 'active'
+                            : ''
+                      }
+                      onClick={() => {
+                        if (id === 'blocos') {
+                          setOpenBlockId(null)
+                          setSelectedNumbers([])
+                          setMemberTab('blocos')
+                          return
+                        }
+                        setMemberTab(id)
+                      }}
                     >
                       <span className="nav-label-full">{full}</span>
                       <span className="nav-label-short">{short}</span>
@@ -480,12 +932,35 @@ export default function LocalApp() {
                   </label>
                   <label className="full">
                     Forma de recebimento
-                    <select value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value as PaymentMethod)} required>
+                    <select
+                      value={paymentMethod}
+                      onChange={(e) => setPaymentMethod(e.target.value as PaymentMethod)}
+                      required
+                      disabled={offlineContingency}
+                    >
                       <option value="dinheiro">Dinheiro</option>
-                      <option value="pix">PIX</option>
+                      <option value="pix" disabled={offlineContingency}>
+                        PIX{offlineContingency ? ' (precisa de nuvem)' : ''}
+                      </option>
                     </select>
                   </label>
-                  {paymentMethod === 'dinheiro' && (
+                  {offlineContingency && (
+                    <p className="hint full payment-rule contingency-hint">
+                      Contingência: só dinheiro. O número fica vendido neste celular e sobe pra nuvem quando a rede
+                      voltar. PIX liberado de novo com “Nuvem ok”.
+                    </p>
+                  )}
+                  {!isAdmin && !offlineContingency && paymentMethod === 'dinheiro' && (
+                    <p className="hint full payment-rule">
+                      O dinheiro fica com você. Depois você presta contas à entidade nos relatórios do ADM.
+                    </p>
+                  )}
+                  {!isAdmin && !offlineContingency && paymentMethod === 'pix' && (
+                    <p className="hint full payment-rule">
+                      PIX sempre na conta da loja. Ao salvar, abrimos o QR e o copia-e-cola para enviar ao comprador.
+                    </p>
+                  )}
+                  {isAdmin && paymentMethod === 'dinheiro' && (
                     <label className="full">
                       Destino do dinheiro
                       <select
@@ -498,7 +973,7 @@ export default function LocalApp() {
                       </select>
                     </label>
                   )}
-                  {paymentMethod === 'pix' && (
+                  {isAdmin && paymentMethod === 'pix' && (
                     <label className="full">
                       PIX caiu em qual conta?
                       <select value={pixDestination} onChange={(e) => setPixDestination(e.target.value as PixDestination)} required>
@@ -507,7 +982,7 @@ export default function LocalApp() {
                       </select>
                     </label>
                   )}
-                  {paymentMethod === 'pix' && (
+                  {isAdmin && paymentMethod === 'pix' && (
                     <label className="full">
                       Já recebeu este PIX?
                       <select name="receivedNow" defaultValue="nao">
@@ -516,31 +991,35 @@ export default function LocalApp() {
                       </select>
                     </label>
                   )}
-                  <label className="full">
-                    TXID / End-to-end (opcional)
-                    <input name="proofTxid" placeholder="Do comprovante, se tiver" />
-                  </label>
-                  <label className="full">
-                    Comprovante (imagem ou PDF, opcional)
-                    <input
-                      name="proofFile"
-                      type="file"
-                      accept="image/*,application/pdf"
-                      onChange={async (ev) => {
-                        const file = ev.target.files?.[0]
-                        if (!file) {
-                          setProofDataUrl('')
-                          return
-                        }
-                        try {
-                          setProofDataUrl(await fileToDataUrl(file))
-                        } catch {
-                          setProofDataUrl('')
-                          showToast('Não foi possível ler o comprovante.')
-                        }
-                      }}
-                    />
-                  </label>
+                  {isAdmin && (
+                    <label className="full">
+                      TXID / End-to-end (opcional)
+                      <input name="proofTxid" placeholder="Do comprovante, se tiver" />
+                    </label>
+                  )}
+                  {isAdmin && (
+                    <label className="full">
+                      Comprovante (imagem ou PDF, opcional)
+                      <input
+                        name="proofFile"
+                        type="file"
+                        accept="image/*,application/pdf"
+                        onChange={async (ev) => {
+                          const file = ev.target.files?.[0]
+                          if (!file) {
+                            setProofDataUrl('')
+                            return
+                          }
+                          try {
+                            setProofDataUrl(await fileToDataUrl(file))
+                          } catch {
+                            setProofDataUrl('')
+                            showToast('Não foi possível ler o comprovante.')
+                          }
+                        }}
+                      />
+                    </label>
+                  )}
                   <label className="full">
                     Observações (opcional)
                     <textarea name="notes" />
@@ -548,9 +1027,18 @@ export default function LocalApp() {
                 </div>
                 <NumberGrid numbers={myNumbers} sold={sold} selected={new Set(selectedNumbers)} onToggle={toggleNumber} />
                 <div className="btn-row">
-                  <button className="btn btn-primary" type="submit" disabled={!selectedNumbers.length}>
-                    Salvar venda ({selectedNumbers.length} nº ·{' '}
-                    {brl(selectedNumbers.length * (activeRaffles.find((r) => r.id === currentRaffleId)?.ticketPrice || 0))})
+                  <button
+                    className="btn btn-primary"
+                    type="submit"
+                    disabled={!selectedNumbers.length || savingSale || (offlineContingency && paymentMethod === 'pix')}
+                  >
+                    {savingSale
+                      ? 'Salvando…'
+                      : offlineContingency && paymentMethod === 'pix'
+                        ? 'PIX bloqueado sem nuvem'
+                        : offlineContingency
+                          ? `Salvar em contingência (${selectedNumbers.length} nº · ${brl(selectedNumbers.length * (activeRaffles.find((r) => r.id === currentRaffleId)?.ticketPrice || 0))})`
+                          : `Salvar venda (${selectedNumbers.length} nº · ${brl(selectedNumbers.length * (activeRaffles.find((r) => r.id === currentRaffleId)?.ticketPrice || 0))})`}
                   </button>
                 </div>
               </>
@@ -573,36 +1061,41 @@ export default function LocalApp() {
                   </tr>
                 </thead>
                 <tbody>
-                  {visibleSales.map((s) => (
-                    <tr key={s.id}>
-                      <td>{s.buyerName}</td>
-                      <td>{formatNumbers(s.numbers)}</td>
-                      <td>
-                        {s.paymentMethod === 'dinheiro'
-                          ? `Dinheiro (${s.cashDestination === 'loja' ? 'loja' : 'vendedor'})`
-                          : `PIX (${s.pixDestination === 'entidade' ? 'entidade' : 'vendedor'})`}
-                        {proofUrlForSale(s, pixCharges) && (
-                          <>
-                            {' · '}
-                            <button
-                              type="button"
-                              className="btn-proof"
-                              title="Abrir comprovante"
-                              onClick={() => openProofUrl(proofUrlForSale(s, pixCharges))}
-                            >
-                              <ProofIcon />
-                            </button>
-                          </>
-                        )}
-                        <div className="hint">
-                          {brl(s.paidAmount)} / {brl(s.totalAmount)}
-                        </div>
-                      </td>
-                      <td>
-                        <span className={`badge ${s.status}`}>{statusLabel[s.status]}</span>
-                      </td>
-                    </tr>
-                  ))}
+                  {visibleSales.map((s) => {
+                    const charge = pixCharges.find((c) => c.saleId === s.id)
+                    const waitingPix = s.paymentMethod === 'pix' && s.status === 'pendente'
+                    return (
+                      <tr key={s.id}>
+                        <td>{s.buyerName}</td>
+                        <td>{formatNumbers(s.numbers)}</td>
+                        <td>
+                          {s.paymentMethod === 'dinheiro'
+                            ? 'Dinheiro (com você · prestar contas)'
+                            : 'PIX (conta da loja)'}
+                          <div className="hint">
+                            {brl(s.totalAmount)}
+                            {charge?.txid ? (
+                              <>
+                                <br />
+                                TXID: <code>{charge.txid}</code>
+                              </>
+                            ) : null}
+                            {waitingPix ? (
+                              <>
+                                <br />
+                                <span className="pix-pending-hint">Aguardando pagamento…</span>
+                              </>
+                            ) : null}
+                          </div>
+                        </td>
+                        <td>
+                          <span className={`badge ${waitingPix ? 'falha' : s.status}`}>
+                            {waitingPix ? 'Aguardando PIX' : statusLabel[s.status]}
+                          </span>
+                        </td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </table>
             </div>
@@ -617,25 +1110,28 @@ export default function LocalApp() {
             <div>
               <h2>Painel ADM</h2>
               <p>Cadastre equipe e faixas, depois cada membro vende só os números dele.</p>
-              {isSupabaseConfigured && loadCloudSession()?.workspace.accessCode && (
-                <p className="hint">
-                  Nuvem ligada · código da equipe para membros:{' '}
-                  <strong>{loadCloudSession()!.workspace.accessCode}</strong>
-                </p>
-              )}
             </div>
             <div className="btn-row" style={{ marginTop: 0 }}>
               <button
                 type="button"
                 className="btn btn-secondary"
                 onClick={() => {
+                  if (!askProceed()) return
                   seedDemo()
                   showToast('Demo: 4 blocos×50. Carlos PIN 1234 (blocos 1–2), Fernanda PIN 5678 (3–4).')
                 }}
               >
                 Carregar demo
               </button>
-              <button type="button" className="btn btn-danger" onClick={() => { resetAll(); showToast('Dados limpos.') }}>
+              <button
+                type="button"
+                className="btn btn-danger"
+                onClick={() => {
+                  if (!askProceed('Tem certeza que deseja limpar todos os dados?')) return
+                  resetAll()
+                  showToast('Dados limpos.')
+                }}
+              >
                 Limpar
               </button>
             </div>
@@ -658,6 +1154,35 @@ export default function LocalApp() {
               <strong>{brl(sales.reduce((a, s) => a + s.paidAmount, 0))}</strong>
             </article>
           </div>
+          {isSupabaseConfigured && loadCloudSession()?.workspace.accessCode ? (
+            <div className="invite-link-box">
+              <h3>Link de acesso da equipe</h3>
+              <p className="hint">
+                Envie este link aos membros (substitui digitar código). No 1º open no celular, a equipe já fica
+                vinculada.
+              </p>
+              <code className="invite-link">
+                {`${window.location.origin}${import.meta.env.BASE_URL || '/rifa-pix/'}?equipe=${loadCloudSession()!.workspace.accessCode}`}
+              </code>
+              <div className="btn-row">
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={async () => {
+                    const link = `${window.location.origin}${import.meta.env.BASE_URL || '/rifa-pix/'}?equipe=${loadCloudSession()!.workspace.accessCode}`
+                    try {
+                      await navigator.clipboard.writeText(link)
+                      showToast('Link copiado.')
+                    } catch {
+                      showToast(link)
+                    }
+                  }}
+                >
+                  Copiar link
+                </button>
+              </div>
+            </div>
+          ) : null}
           <h3>Sugestões TXID</h3>
           {suggestions.length === 0 && <p className="empty">Nenhuma sugestão agora.</p>}
           {suggestions.map((s) => {
@@ -684,6 +1209,39 @@ export default function LocalApp() {
               </div>
             )
           })}
+          <h3>Rastro de ações</h3>
+          <p className="hint">Quem fez o quê — útil com vários ADMs na mesma equipe.</p>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Quando</th>
+                  <th>Quem</th>
+                  <th>Ação</th>
+                  <th>Detalhe</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(auditLog || []).length === 0 && (
+                  <tr>
+                    <td colSpan={4}>
+                      <p className="empty">Nenhuma ação registrada ainda.</p>
+                    </td>
+                  </tr>
+                )}
+                {(auditLog || []).slice(0, 40).map((a) => (
+                  <tr key={a.id}>
+                    <td>{new Date(a.at).toLocaleString('pt-BR')}</td>
+                    <td>{a.actorName}</td>
+                    <td>
+                      <code>{a.action}</code>
+                    </td>
+                    <td>{a.detail || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </section>
       )}
 
@@ -691,23 +1249,62 @@ export default function LocalApp() {
         <section className="grid-2">
           <form
             className="panel"
-            onSubmit={(e) => {
+            onSubmit={async (e) => {
               e.preventDefault()
               const fd = new FormData(e.currentTarget)
-              const result = addMember({
-                name: String(fd.get('name') || ''),
-                phone: String(fd.get('phone') || ''),
-                pin: String(fd.get('pin') || ''),
-              })
+              const name = String(fd.get('name') || '')
+              const phone = String(fd.get('phone') || '')
+              const pin = String(fd.get('pin') || '')
+              const wantFull = fullAccess
+              const email = String(fd.get('adminEmail') || '').trim()
+              const tempPassword = String(fd.get('tempPassword') || '')
+
+              if (wantFull) {
+                if (!askProceed('Criar este membro com acesso total (ADM)?')) return
+                if (!email.includes('@')) return showToast('Informe o e-mail do acesso total.')
+                if (tempPassword.length < 6) return showToast('Senha provisória com no mínimo 6 caracteres.')
+              }
+
+              const result = addMember({ name, phone, pin })
               if (!result.ok) return showToast(result.error)
+
+              if (wantFull) {
+                const cloud = loadCloudSession()
+                if (!cloud?.workspace.id) {
+                  showToast('Membro criado, mas sem nuvem para liberar acesso total.')
+                  e.currentTarget.reset()
+                  setFullAccess(false)
+                  return
+                }
+                try {
+                  await createWorkspaceAdmin({
+                    workspaceId: cloud.workspace.id,
+                    displayName: result.member.name,
+                    email,
+                    password: tempPassword,
+                  })
+                  logAudit('membro.acesso_total', `${result.member.name} · ${email}`)
+                  showToast(
+                    `Membro ${result.member.name} criado com acesso total. No 1º login com e-mail, deve trocar a senha.`,
+                  )
+                } catch (err) {
+                  logAudit('membro.criar', result.member.name)
+                  showToast(
+                    `Membro criado, mas falhou o acesso total: ${err instanceof Error ? err.message : 'erro'}`,
+                  )
+                }
+              } else {
+                logAudit('membro.criar', result.member.name)
+                showToast(`Membro ${result.member.name} criado.`)
+              }
               e.currentTarget.reset()
-              showToast(`Membro ${result.member.name} criado.`)
+              setFullAccess(false)
             }}
           >
             <div className="panel-head">
               <div>
                 <h2>Cadastrar membro</h2>
-                <p>PIN para o membro entrar e ver só os números dele.</p>
+                <p>PIN para vender nos blocos. Marque acesso total se também for ADM da equipe.</p>
               </div>
             </div>
             <div className="form-grid">
@@ -720,9 +1317,35 @@ export default function LocalApp() {
                 <input name="phone" />
               </label>
               <label className="full">
-                PIN (mín. 4)
+                PIN (mín. 4) — login como membro
                 <input name="pin" required minLength={4} inputMode="numeric" />
               </label>
+              <label className="check-row full">
+                <input type="checkbox" checked={fullAccess} onChange={(e) => setFullAccess(e.target.checked)} />
+                Acesso total (ADM da mesma equipe)
+              </label>
+              {fullAccess ? (
+                <>
+                  <label className="full">
+                    E-mail (login Administrador)
+                    <input name="adminEmail" type="email" required={fullAccess} autoComplete="off" />
+                  </label>
+                  <label className="full">
+                    Senha provisória (troca obrigatória no 1º login)
+                    <input
+                      name="tempPassword"
+                      type="password"
+                      required={fullAccess}
+                      minLength={6}
+                      autoComplete="new-password"
+                    />
+                  </label>
+                  <p className="hint full">
+                    Entra em <strong>Administrador</strong> com e-mail/senha. No primeiro acesso o sistema exige troca
+                    de senha.
+                  </p>
+                </>
+              ) : null}
             </div>
             <div className="btn-row">
               <button className="btn btn-primary" type="submit">
@@ -735,19 +1358,26 @@ export default function LocalApp() {
             className="panel"
             onSubmit={(e) => {
               e.preventDefault()
+              if (!askProceed()) return
               const fd = new FormData(e.currentTarget)
-              const blockId = assignBlockId || String(fd.get('blockId') || '')
-              const result = assignBlock(blockId, String(fd.get('memberId') || ''))
-              if (!result.ok) return showToast(result.error || 'Erro')
-              setAssignBlockId('')
+              const memberIdSel = String(fd.get('memberId') || '')
+              if (!assignBlockIds.length) return showToast('Selecione ao menos um bloco.')
+              let ok = 0
+              for (const blockId of assignBlockIds) {
+                const result = assignBlock(blockId, memberIdSel)
+                if (!result.ok) return showToast(result.error || 'Erro')
+                ok += 1
+              }
+              setAssignBlockIds([])
               e.currentTarget.reset()
-              showToast('Bloco atribuído ao membro.')
+              logAudit('bloco.atribuir', `${ok} bloco(s) → membro`)
+              showToast(ok === 1 ? 'Bloco atribuído ao membro.' : `${ok} blocos atribuídos ao membro.`)
             }}
           >
             <div className="panel-head">
               <div>
                 <h2>Atribuir bloco livre</h2>
-                <p>Verde = livre. Cinza = já atribuído (indisponível aqui). Transferências entre membros ficam na aba Transferências.</p>
+                <p>Verde = livre. Cinza = já atribuído. Selecione um ou vários blocos de uma vez.</p>
               </div>
             </div>
             <div className="form-grid">
@@ -757,7 +1387,7 @@ export default function LocalApp() {
                   value={filterEventId || raffles[0]?.id || ''}
                   onChange={(e) => {
                     setFilterEventId(e.target.value)
-                    setAssignBlockId('')
+                    setAssignBlockIds([])
                   }}
                 >
                   {raffles.map((r) => (
@@ -777,15 +1407,18 @@ export default function LocalApp() {
                       const st = blockStats(b.id)
                       const assigned = Boolean(b.memberId)
                       const owner = members.find((m) => m.id === b.memberId)?.name || 'livre'
+                      const selected = assignBlockIds.includes(b.id)
                       return (
                         <button
                           key={b.id}
                           type="button"
-                          className={`transfer-block ${assigned ? 'assigned' : 'free'} ${assignBlockId === b.id ? 'selected' : ''}`}
+                          className={`transfer-block ${assigned ? 'assigned' : 'free'} ${selected ? 'selected' : ''}`}
                           disabled={assigned}
                           onClick={() => {
                             if (assigned) return
-                            setAssignBlockId(b.id)
+                            setAssignBlockIds((prev) =>
+                              prev.includes(b.id) ? prev.filter((id) => id !== b.id) : [...prev, b.id],
+                            )
                           }}
                         >
                           <strong>{b.label}</strong>
@@ -797,8 +1430,10 @@ export default function LocalApp() {
                       )
                     })}
                 </div>
-                <input type="hidden" name="blockId" value={assignBlockId} />
-                {!assignBlockId && <p className="hint">Selecione um bloco livre (verde) acima.</p>}
+                {!assignBlockIds.length && <p className="hint">Selecione um ou mais blocos livres (verde).</p>}
+                {assignBlockIds.length > 0 && (
+                  <p className="hint">{assignBlockIds.length} bloco(s) selecionado(s).</p>
+                )}
               </div>
               <label className="full">
                 Para o membro
@@ -815,8 +1450,8 @@ export default function LocalApp() {
               </label>
             </div>
             <div className="btn-row">
-              <button className="btn btn-primary" type="submit" disabled={!assignBlockId}>
-                Atribuir bloco
+              <button className="btn btn-primary" type="submit" disabled={!assignBlockIds.length}>
+                Atribuir {assignBlockIds.length > 1 ? `blocos (${assignBlockIds.length})` : 'bloco'}
               </button>
             </div>
           </form>
@@ -868,14 +1503,28 @@ export default function LocalApp() {
                           return (
                             <div key={b.id} className={`mini-block ${soldOut ? 'sold-out' : 'has-open'}`}>
                               {b.label} · {bs.open}/{bs.total}
-                              <button type="button" className="btn btn-ghost" onClick={() => unassignBlock(b.id)}>
+                              <button
+                                type="button"
+                                className="btn btn-ghost"
+                                onClick={() => {
+                                  if (!askProceed()) return
+                                  unassignBlock(b.id)
+                                }}
+                              >
                                 liberar
                               </button>
                             </div>
                           )
                         })}
                     </div>
-                    <button type="button" className="btn btn-danger" onClick={() => removeMember(m.id)}>
+                    <button
+                      type="button"
+                      className="btn btn-danger"
+                      onClick={() => {
+                        if (!askProceed('Tem certeza que deseja remover este membro?')) return
+                        removeMember(m.id)
+                      }}
+                    >
                       Remover membro
                     </button>
                   </article>
@@ -892,19 +1541,26 @@ export default function LocalApp() {
             className="panel"
             onSubmit={(e) => {
               e.preventDefault()
+              if (!askProceed()) return
               const fd = new FormData(e.currentTarget)
-              const blockId = transferBlockId || String(fd.get('blockId') || '')
-              const result = transferBlock(blockId, String(fd.get('memberId') || ''))
-              if (!result.ok) return showToast(result.error || 'Erro')
-              setTransferBlockId('')
+              const toMember = String(fd.get('memberId') || '')
+              if (!transferBlockIds.length) return showToast('Selecione ao menos um bloco.')
+              let ok = 0
+              for (const blockId of transferBlockIds) {
+                const result = transferBlock(blockId, toMember)
+                if (!result.ok) return showToast(result.error || 'Erro')
+                ok += 1
+              }
+              setTransferBlockIds([])
               e.currentTarget.reset()
-              showToast('Transferência registrada.')
+              showToast(ok === 1 ? 'Transferência registrada.' : `${ok} transferências registradas.`)
+              logAudit('bloco.transferir', `${ok} bloco(s)`)
             }}
           >
             <div className="panel-head">
               <div>
                 <h2>Transferir bloco entre membros</h2>
-                <p>Azul = tem números abertos. Vermelho = vendido (não transfere). Cada movimentação fica no relatório.</p>
+                <p>Azul = tem números abertos. Vermelho = vendido (não transfere). Selecione um ou vários.</p>
               </div>
             </div>
             <div className="form-grid">
@@ -914,7 +1570,7 @@ export default function LocalApp() {
                   value={transferEventId || filterEventId || raffles[0]?.id || ''}
                   onChange={(e) => {
                     setTransferEventId(e.target.value)
-                    setTransferBlockId('')
+                    setTransferBlockIds([])
                   }}
                 >
                   {raffles.map((r) => (
@@ -934,18 +1590,21 @@ export default function LocalApp() {
                       const st = blockStats(b.id)
                       const soldOut = st.open <= 0
                       const owner = members.find((m) => m.id === b.memberId)?.name || '—'
+                      const selected = transferBlockIds.includes(b.id)
                       return (
                         <button
                           key={b.id}
                           type="button"
-                          className={`transfer-block ${soldOut ? 'sold-out' : 'has-open'} ${transferBlockId === b.id ? 'selected' : ''}`}
+                          className={`transfer-block ${soldOut ? 'sold-out' : 'has-open'} ${selected ? 'selected' : ''}`}
                           disabled={soldOut}
                           onClick={() => {
                             if (soldOut) {
                               showToast('Esse bloco não pode ser transferido: está vendido (sem números abertos).')
                               return
                             }
-                            setTransferBlockId(b.id)
+                            setTransferBlockIds((prev) =>
+                              prev.includes(b.id) ? prev.filter((id) => id !== b.id) : [...prev, b.id],
+                            )
                           }}
                         >
                           <strong>{b.label}</strong>
@@ -957,8 +1616,10 @@ export default function LocalApp() {
                       )
                     })}
                 </div>
-                <input type="hidden" name="blockId" value={transferBlockId} />
-                {!transferBlockId && <p className="hint">Selecione um bloco azul acima.</p>}
+                {!transferBlockIds.length && <p className="hint">Selecione um ou mais blocos azuis.</p>}
+                {transferBlockIds.length > 0 && (
+                  <p className="hint">{transferBlockIds.length} bloco(s) selecionado(s).</p>
+                )}
               </div>
               <label className="full">
                 Novo membro
@@ -975,8 +1636,8 @@ export default function LocalApp() {
               </label>
             </div>
             <div className="btn-row">
-              <button className="btn btn-primary" type="submit" disabled={!transferBlockId}>
-                Transferir bloco
+              <button className="btn btn-primary" type="submit" disabled={!transferBlockIds.length}>
+                Transferir {transferBlockIds.length > 1 ? `blocos (${transferBlockIds.length})` : 'bloco'}
               </button>
             </div>
           </form>
@@ -1004,8 +1665,10 @@ export default function LocalApp() {
                     const block = blocks.find((b) => b.id === t.blockId)
                     const kindLabel =
                       t.kind === 'assign' ? 'Atribuição' : t.kind === 'transfer' ? 'Transferência' : 'Liberação'
+                    const rowClass =
+                      t.kind === 'assign' ? 'row-assign' : t.kind === 'transfer' ? 'row-transfer' : ''
                     return (
-                      <tr key={t.id}>
+                      <tr key={t.id} className={rowClass}>
                         <td>{new Date(t.createdAt).toLocaleString('pt-BR')}</td>
                         <td>{kindLabel}</td>
                         <td>{block?.label || '—'}</td>
@@ -1246,79 +1909,98 @@ export default function LocalApp() {
         </section>
       )}
 
-      {isAdmin && adminTab === 'pix' && (
-        <section className="panel">
-          <div className="panel-head">
-            <div>
-              <h2>Importar CSV e baixar por TXID</h2>
-              <p>Só ADM. Casa TXID/E2E do extrato com o comprovante salvo na venda.</p>
-            </div>
-            <button type="button" className="btn btn-secondary" onClick={() => setImportPreview(parsePixCsv(SAMPLE_CSV))}>
-              Exemplo
-            </button>
-          </div>
-          <textarea
-            value={csvText}
-            onChange={(e) => {
-              setCsvText(e.target.value)
-              setImportPreview(parsePixCsv(e.target.value))
-            }}
-            placeholder="Cole o CSV do banco"
-          />
-          {importPreview && (
-            <>
-              <p className="hint">
-                {importPreview.rows.length} linhas · {txidPreview.length} matches TXID
-              </p>
-              <div className="btn-row">
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  onClick={() => {
-                    const r = importCsvAndSettleByTxid(importPreview.rows)
-                    showToast(`Importados ${r.imported}. Baixas ${r.settled}.`)
-                    setCsvText('')
-                    setImportPreview(null)
-                  }}
-                >
-                  Importar e compensar
-                </button>
-              </div>
-            </>
-          )}
-        </section>
-      )}
-
       {isAdmin && adminTab === 'txid' && (
         <section className="panel">
           <div className="panel-head">
             <div>
-              <h2>TXIDs / comprovantes</h2>
+              <h2>TXIDs / PIX da loja</h2>
+              <p>Cobranças geradas na venda · vinculadas ao membro e ao comprador. Baixa automática via Sicoob.</p>
             </div>
+            <button type="button" className="btn btn-secondary" onClick={() => void syncPixChargesFromCloud()}>
+              Atualizar
+            </button>
           </div>
           <div className="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>Venda</th>
+                  <th>Quando</th>
+                  <th>Membro</th>
+                  <th>Comprador</th>
+                  <th>Números</th>
                   <th>TXID</th>
                   <th>Valor</th>
                   <th>Status</th>
                 </tr>
               </thead>
               <tbody>
-                {pixCharges.map((c) => (
-                  <tr key={c.id}>
-                    <td>{sales.find((s) => s.id === c.saleId)?.buyerName || '—'}</td>
-                    <td>
-                      <code>{c.txid}</code>
-                    </td>
-                    <td>{brl(c.amount)}</td>
-                    <td>
-                      <span className={`badge ${c.status === 'paid' ? 'quitado' : 'pendente'}`}>{c.status}</span>
+                {pixCharges.length === 0 && (
+                  <tr>
+                    <td colSpan={7}>
+                      <p className="empty">
+                        Nenhuma cobrança PIX ainda. Quando o membro gerar o QR, o TXID aparece aqui.
+                      </p>
                     </td>
                   </tr>
-                ))}
+                )}
+                {[...pixCharges]
+                  .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+                  .map((c) => {
+                    const sale = sales.find((s) => s.id === c.saleId)
+                    const member = members.find((m) => m.id === (sale?.memberId || ''))
+                    return (
+                      <tr
+                        key={c.id}
+                        className={
+                          c.status === 'expired' ||
+                          c.status === 'cancelled' ||
+                          sale?.status === 'divergente' ||
+                          sale?.status === 'parcial'
+                            ? 'txid-falha'
+                            : undefined
+                        }
+                      >
+                        <td>{c.createdAt ? new Date(c.createdAt).toLocaleString('pt-BR') : '—'}</td>
+                        <td>{member?.name || '—'}</td>
+                        <td>
+                          {sale?.buyerName || '—'}
+                          {sale?.buyerPhone ? <div className="hint">{sale.buyerPhone}</div> : null}
+                        </td>
+                        <td>{sale ? formatNumbers(sale.numbers) : '—'}</td>
+                        <td>
+                          <code>{c.txid}</code>
+                          {c.provider ? <div className="hint">{c.provider}</div> : null}
+                        </td>
+                        <td>{brl(c.amount)}</td>
+                        <td>
+                          <span
+                            className={`badge ${
+                              c.status === 'expired' ||
+                              c.status === 'cancelled' ||
+                              sale?.status === 'divergente' ||
+                              sale?.status === 'parcial'
+                                ? 'falha'
+                                : c.status === 'paid'
+                                  ? 'quitado'
+                                  : 'pendente'
+                            }`}
+                          >
+                            {c.status === 'expired' ||
+                            c.status === 'cancelled' ||
+                            sale?.status === 'divergente' ||
+                            sale?.status === 'parcial'
+                              ? 'falha'
+                              : c.status === 'paid'
+                                ? 'pago'
+                                : c.status}
+                          </span>
+                          {sale ? (
+                            <div className="hint">venda: {statusLabel[sale.status]}</div>
+                          ) : null}
+                        </td>
+                      </tr>
+                    )
+                  })}
               </tbody>
             </table>
           </div>
@@ -1330,79 +2012,153 @@ export default function LocalApp() {
           <div className="panel">
             <div className="panel-head">
               <div>
-                <h2>Prestações / fechamentos com membros</h2>
-                <p>Registros de “Receber dinheiro” e “Receber PIX vendedor” feitos em Relatórios.</p>
+                <h2>Prestação de contas (Dinheiro)</h2>
+                <p>Selecione o membro, marque as vendas em aberto e liquide com senha do ADM + PIN do membro.</p>
+              </div>
+              <div className="baixa-totals">
+                <div>
+                  <span className="hint">Total em aberto</span>
+                  <strong>{brl(baixaOpenTotal)}</strong>
+                </div>
+                <div>
+                  <span className="hint">Valor a quitar</span>
+                  <strong>{brl(baixaQuitTotal)}</strong>
+                </div>
               </div>
             </div>
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Quando</th>
-                    <th>Membro</th>
-                    <th>Tipo</th>
-                    <th>Valor</th>
-                    <th>Obs.</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {memberSettlements.length === 0 && (
-                    <tr>
-                      <td colSpan={5}>
-                        <p className="empty">Nenhuma prestação registrada ainda.</p>
-                      </td>
-                    </tr>
-                  )}
-                  {memberSettlements.map((row) => (
-                    <tr key={row.id}>
-                      <td>{new Date(row.createdAt).toLocaleString('pt-BR')}</td>
-                      <td>{members.find((m) => m.id === row.memberId)?.name || '—'}</td>
-                      <td>{row.kind === 'dinheiro' ? 'Dinheiro' : 'PIX vendedor'}</td>
-                      <td>{brl(row.amount)}</td>
-                      <td>{row.note || '—'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
 
-          <div className="panel">
-            <div className="panel-head">
-              <div>
-                <h2>Baixas de PIX (amortização por venda)</h2>
-                <p>Quando um PIX do extrato/CSV é aplicado em uma venda específica.</p>
-              </div>
+            <div className="form-grid report-filters">
+              <label>
+                Membro
+                <select
+                  value={baixaMemberId}
+                  onChange={(e) => {
+                    setBaixaMemberId(e.target.value)
+                    setBaixaSelectedIds([])
+                  }}
+                >
+                  <option value="">Selecione o membro</option>
+                  {members
+                    .filter((m) => m.active)
+                    .map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.name}
+                      </option>
+                    ))}
+                </select>
+              </label>
             </div>
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Quando</th>
-                    <th>Venda</th>
-                    <th>Valor</th>
-                    <th>Obs.</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {amortizations.length === 0 && (
-                    <tr>
-                      <td colSpan={4}>
-                        <p className="empty">Nenhuma amortização de PIX ainda.</p>
-                      </td>
-                    </tr>
-                  )}
-                  {amortizations.map((a) => (
-                    <tr key={a.id}>
-                      <td>{new Date(a.createdAt).toLocaleString('pt-BR')}</td>
-                      <td>{sales.find((s) => s.id === a.saleId)?.buyerName || '—'}</td>
-                      <td>{brl(a.amount)}</td>
-                      <td>{a.note || '—'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+
+            {!baixaMemberId && <p className="empty">Escolha um membro para ver as pendências em dinheiro.</p>}
+
+            {baixaMemberId && (
+              <>
+                <label className="baixa-check-all">
+                  <input
+                    type="checkbox"
+                    checked={baixaPendingSales.length > 0 && baixaSelectedIds.length === baixaPendingSales.length}
+                    onChange={(e) => {
+                      setBaixaSelectedIds(e.target.checked ? baixaPendingSales.map((s) => s.id) : [])
+                    }}
+                  />
+                  Marcar todos
+                </label>
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th></th>
+                        <th>Quando</th>
+                        <th>Comprador</th>
+                        <th>Números</th>
+                        <th>Valor</th>
+                        <th>Obs.</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {baixaPendingSales.length === 0 && (
+                        <tr>
+                          <td colSpan={6}>
+                            <p className="empty">Nenhuma pendência em dinheiro para este membro.</p>
+                          </td>
+                        </tr>
+                      )}
+                      {baixaPendingSales.map((s) => (
+                        <tr key={s.id}>
+                          <td>
+                            <input
+                              type="checkbox"
+                              checked={baixaSelectedIds.includes(s.id)}
+                              onChange={(e) => {
+                                setBaixaSelectedIds((prev) =>
+                                  e.target.checked ? [...prev, s.id] : prev.filter((id) => id !== s.id),
+                                )
+                              }}
+                            />
+                          </td>
+                          <td>{new Date(s.createdAt).toLocaleString('pt-BR')}</td>
+                          <td>
+                            {s.buyerName}
+                            {s.buyerPhone ? <div className="hint">{s.buyerPhone}</div> : null}
+                          </td>
+                          <td>{formatNumbers(s.numbers)}</td>
+                          <td>{brl(s.totalAmount)}</td>
+                          <td>{s.notes || '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="btn-row">
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={baixaQuitTotal <= 0 || settlingBaixa}
+                    onClick={async () => {
+                      if (baixaQuitTotal <= 0 || settlingBaixa) return
+                      if (!askProceed()) return
+                      const member = members.find((m) => m.id === baixaMemberId)
+                      if (!member) return
+                      const admPwd = window.prompt(
+                        getAuthRecord()
+                          ? 'Senha do ADM:'
+                          : 'Senha do ADM não configurada. Digite CONFIRMAR:',
+                      )
+                      if (admPwd == null) return
+                      try {
+                        await verifyAdminPassword(admPwd)
+                      } catch (err) {
+                        return showToast(err instanceof Error ? err.message : 'Senha ADM inválida')
+                      }
+                      const pin = window.prompt(`PIN do membro ${member.name}:`)
+                      if (pin == null) return
+                      if (pin.trim() !== member.pin.trim()) return showToast('PIN do membro incorreto.')
+                      setSettlingBaixa(true)
+                      try {
+                        const result = settleCashSales({
+                          memberId: member.id,
+                          saleIds: baixaSelectedIds,
+                          memberName: member.name,
+                        })
+                        if (!result.ok) return showToast(result.error)
+                        setBaixaSelectedIds([])
+                        try {
+                          await flushWorkspaceToCloud(useStore.getState().exportSnapshot())
+                        } catch (syncErr) {
+                          console.warn(syncErr)
+                        }
+                        showToast(`Liquidado ${brl(result.amount)} — baixado e assinado por todos.`)
+                        logAudit('dinheiro.liquidar', `${member.name} · ${brl(result.amount)}`)
+                      } finally {
+                        setSettlingBaixa(false)
+                      }
+                    }}
+                  >
+                    {settlingBaixa ? 'Liquidando…' : `Liquidar ${brl(baixaQuitTotal)}`}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </section>
       )}
@@ -1547,42 +2303,25 @@ export default function LocalApp() {
                   </p>
                 </div>
                 <div className="btn-row wrap">
-                  {selectedReport.cashOpen > 0 && (
-                    <button
-                      type="button"
-                      className="btn btn-primary"
-                      onClick={() => {
-                        addMemberSettlement({
-                          memberId: selectedReport.member.id,
-                          amount: selectedReport.cashOpen,
-                          kind: 'dinheiro',
-                          note: 'Prestação dinheiro',
-                          raffleId: reportEventId || undefined,
-                        })
-                        showToast('Dinheiro quitado com a entidade.')
-                      }}
-                    >
-                      Receber dinheiro {brl(selectedReport.cashOpen)}
-                    </button>
-                  )}
-                  {selectedReport.pixVendedorOpen > 0 && (
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      onClick={() => {
-                        addMemberSettlement({
-                          memberId: selectedReport.member.id,
-                          amount: selectedReport.pixVendedorOpen,
-                          kind: 'pix_vendedor',
-                          note: 'Repasse PIX vendedor',
-                          raffleId: reportEventId || undefined,
-                        })
-                        showToast('PIX do vendedor prestado.')
-                      }}
-                    >
-                      Receber PIX {brl(selectedReport.pixVendedorOpen)}
-                    </button>
-                  )}
+                  <div className="baixa-totals">
+                    <div>
+                      <span className="hint">Total recebido (prestações)</span>
+                      <strong>
+                        {brl(
+                          selectedReport.settlements.reduce((a, x) => a + x.amount, 0) +
+                            selectedReport.mSales
+                              .filter((s) => s.paymentMethod === 'pix' && s.status === 'quitado')
+                              .reduce((a, s) => a + s.paidAmount, 0),
+                        )}
+                      </strong>
+                    </div>
+                    <div>
+                      <span className="hint">A prestar (dinheiro)</span>
+                      <strong className={selectedReport.cashOpen > 0 ? 'warn-text' : ''}>
+                        {brl(selectedReport.cashOpen)}
+                      </strong>
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -1634,40 +2373,11 @@ export default function LocalApp() {
                       <ul className="breakdown-list">
                         <li>
                           <span>Dinheiro já na loja</span>
-                          <strong>{brl(selectedReport.cashLoja)}</strong>
+                          <strong>{brl(selectedReport.dinheiroNaLoja)}</strong>
                         </li>
                         <li>
                           <span>Dinheiro ainda com o vendedor</span>
-                          <strong>{brl(selectedReport.cashVendedor)}</strong>
-                        </li>
-                        <li>
-                          <span>Já prestado (dinheiro)</span>
-                          <strong>{brl(selectedReport.settledCash)}</strong>
-                        </li>
-                        <li className={selectedReport.cashOpen > 0 ? 'warn' : ''}>
-                          <span>Dinheiro a receber dele</span>
                           <strong>{brl(selectedReport.cashOpen)}</strong>
-                        </li>
-                      </ul>
-                    </article>
-                    <article>
-                      <h3>PIX</h3>
-                      <ul className="breakdown-list">
-                        <li>
-                          <span>PIX direto na entidade</span>
-                          <strong>{brl(selectedReport.pixEntidade)}</strong>
-                        </li>
-                        <li>
-                          <span>PIX na conta do vendedor</span>
-                          <strong>{brl(selectedReport.pixVendedor)}</strong>
-                        </li>
-                        <li>
-                          <span>Já prestado (PIX vendedor)</span>
-                          <strong>{brl(selectedReport.settledPix)}</strong>
-                        </li>
-                        <li className={selectedReport.pixVendedorOpen > 0 ? 'warn' : ''}>
-                          <span>PIX a receber dele</span>
-                          <strong>{brl(selectedReport.pixVendedorOpen)}</strong>
                         </li>
                       </ul>
                     </article>
@@ -1675,22 +2385,20 @@ export default function LocalApp() {
                       <h3>Vendas</h3>
                       <ul className="breakdown-list">
                         <li>
-                          <span>Qtd. de vendas</span>
-                          <strong>{selectedReport.saleCount}</strong>
+                          <span>Venda PIX</span>
+                          <strong>{brl(selectedReport.pixSalesAmount)}</strong>
                         </li>
                         <li>
-                          <span>Números vendidos</span>
-                          <strong>{selectedReport.soldCount}</strong>
+                          <span>Vendas em dinheiro</span>
+                          <strong>{brl(selectedReport.cashSalesAmount)}</strong>
                         </li>
                         <li>
-                          <span>Com comprovante</span>
-                          <strong>
-                            {selectedReport.withProof}/{selectedReport.saleCount}
-                          </strong>
+                          <span>Valor do ticket</span>
+                          <strong>{brl(selectedReport.ticketPrice)}</strong>
                         </li>
                         <li>
-                          <span>Já na entidade (loja+PIX+prestado)</span>
-                          <strong>{brl(selectedReport.toEntity)}</strong>
+                          <span>Total vendas</span>
+                          <strong>{brl(selectedReport.expected)}</strong>
                         </li>
                       </ul>
                     </article>
@@ -1702,16 +2410,18 @@ export default function LocalApp() {
                           <strong>{selectedReport.byStatus.quitado}</strong>
                         </li>
                         <li>
-                          <span>Pendente</span>
+                          <span>Pendente (dinheiro a prestar)</span>
                           <strong>{selectedReport.byStatus.pendente}</strong>
                         </li>
                         <li>
                           <span>Parcial</span>
                           <strong>{selectedReport.byStatus.parcial}</strong>
                         </li>
-                        <li>
-                          <span>Divergente</span>
-                          <strong>{selectedReport.byStatus.divergente}</strong>
+                        <li className={selectedReport.byStatus.falha || selectedReport.byStatus.divergente ? 'warn' : ''}>
+                          <span>Divergente / falha</span>
+                          <strong>
+                            {(selectedReport.byStatus.falha || 0) + (selectedReport.byStatus.divergente || 0)}
+                          </strong>
                         </li>
                       </ul>
                     </article>
@@ -1744,15 +2454,14 @@ export default function LocalApp() {
                         <th>Valor</th>
                         <th>Forma</th>
                         <th>Status</th>
-                        <th>Comprovante</th>
                       </tr>
                     </thead>
                     <tbody>
                       {[...selectedReport.mSales]
                         .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
                         .map((s) => {
-                          const proof = proofUrlForSale(s, pixCharges)
                           const raffle = raffles.find((r) => r.id === s.raffleId)
+                          const ui = saleUiStatus(s, pixCharges)
                           return (
                             <tr key={s.id}>
                               <td>{new Date(s.createdAt).toLocaleString('pt-BR')}</td>
@@ -1762,37 +2471,19 @@ export default function LocalApp() {
                                 {s.buyerPhone ? <div className="hint">{s.buyerPhone}</div> : null}
                               </td>
                               <td>{formatNumbers(s.numbers)}</td>
+                              <td>{brl(s.totalAmount)}</td>
+                              <td>{s.paymentMethod === 'dinheiro' ? 'Dinheiro' : 'PIX'}</td>
                               <td>
-                                {brl(s.paidAmount)}/{brl(s.totalAmount)}
-                              </td>
-                              <td>
-                                {s.paymentMethod === 'dinheiro'
-                                  ? `Dinheiro (${s.cashDestination === 'loja' ? 'loja' : 'vendedor'})`
-                                  : `PIX/${s.pixDestination || '—'}`}
-                              </td>
-                              <td>
-                                <span className={`badge ${s.status}`}>{statusLabel[s.status]}</span>
-                              </td>
-                              <td>
-                                {proof ? (
-                                  <button
-                                    type="button"
-                                    className="btn-proof"
-                                    title="Abrir comprovante"
-                                    onClick={() => openProofUrl(proof)}
-                                  >
-                                    <ProofIcon />
-                                  </button>
-                                ) : (
-                                  '—'
-                                )}
+                                <span className={`badge ${ui === 'falha' ? 'falha' : ui}`}>
+                                  {ui === 'falha' ? 'Falha' : ui === 'quitado' ? 'Quitado' : 'Pendente'}
+                                </span>
                               </td>
                             </tr>
                           )
                         })}
                       {selectedReport.mSales.length === 0 && (
                         <tr>
-                          <td colSpan={8}>
+                          <td colSpan={7}>
                             <p className="empty">Nenhuma venda deste membro no filtro.</p>
                           </td>
                         </tr>
@@ -1856,34 +2547,82 @@ export default function LocalApp() {
               )}
 
               {reportDetail === 'baixas' && (
-                <div className="table-wrap">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Quando</th>
-                        <th>Tipo</th>
-                        <th>Valor</th>
-                        <th>Obs.</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {selectedReport.settlements.map((x) => (
-                        <tr key={x.id}>
-                          <td>{new Date(x.createdAt).toLocaleString('pt-BR')}</td>
-                          <td>{x.kind === 'dinheiro' ? 'Dinheiro' : 'PIX vendedor'}</td>
-                          <td>{brl(x.amount)}</td>
-                          <td>{x.note || '—'}</td>
-                        </tr>
-                      ))}
-                      {selectedReport.settlements.length === 0 && (
-                        <tr>
-                          <td colSpan={4}>
-                            <p className="empty">Nenhuma prestação registrada deste membro.</p>
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
+                <div>
+                  {(() => {
+                    const pixPaidRows = selectedReport.mSales
+                      .filter((s) => s.paymentMethod === 'pix' && saleUiStatus(s, pixCharges) === 'quitado')
+                      .map((s) => {
+                        const charge = pixCharges.find((c) => c.saleId === s.id && c.status === 'paid')
+                        return {
+                          id: `pix-${s.id}`,
+                          when: charge?.paidAt || s.createdAt,
+                          tipo: 'PIX',
+                          buyer: s.buyerName,
+                          numbers: formatNumbers(s.numbers),
+                          amount: s.paidAmount || s.totalAmount,
+                          detail: charge?.txid || '—',
+                        }
+                      })
+                    const cashRows = selectedReport.settlements
+                      .filter((x) => x.kind === 'dinheiro')
+                      .map((x) => ({
+                        id: x.id,
+                        when: x.createdAt,
+                        tipo: 'Dinheiro',
+                        buyer: x.saleIds?.length
+                          ? `${x.saleIds.length} venda(s)`
+                          : 'Prestação',
+                        numbers: '—',
+                        amount: x.amount,
+                        detail: x.note || '—',
+                      }))
+                    const rows = [...pixPaidRows, ...cashRows].sort((a, b) =>
+                      String(b.when).localeCompare(String(a.when)),
+                    )
+                    const totalRecv = rows.reduce((a, r) => a + r.amount, 0)
+                    return (
+                      <>
+                        <p className="hint">
+                          Total recebido neste dossiê: <strong>{brl(totalRecv)}</strong>
+                        </p>
+                        <div className="table-wrap">
+                          <table>
+                            <thead>
+                              <tr>
+                                <th>Quando</th>
+                                <th>Tipo</th>
+                                <th>Comprador</th>
+                                <th>Números</th>
+                                <th>Valor</th>
+                                <th>Detalhe</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {rows.length === 0 && (
+                                <tr>
+                                  <td colSpan={6}>
+                                    <p className="empty">Nenhuma baixa ainda (PIX pago ou dinheiro prestado).</p>
+                                  </td>
+                                </tr>
+                              )}
+                              {rows.map((r) => (
+                                <tr key={r.id}>
+                                  <td>{new Date(r.when).toLocaleString('pt-BR')}</td>
+                                  <td>{r.tipo}</td>
+                                  <td>{r.buyer}</td>
+                                  <td>{r.numbers}</td>
+                                  <td>{brl(r.amount)}</td>
+                                  <td>
+                                    {r.tipo === 'PIX' ? <code>{r.detail}</code> : r.detail}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </>
+                    )
+                  })()}
                 </div>
               )}
 
@@ -1962,6 +2701,20 @@ export default function LocalApp() {
         </section>
       )}
 
+      {pixModal && (
+        <PixChargeModal
+          buyerName={pixModal.buyerName}
+          amount={pixModal.amount}
+          copyPaste={pixModal.copyPaste}
+          txid={pixModal.txid}
+          isDemo={pixModal.isDemo}
+          checking={checkingPix}
+          paid={pixPaid}
+          expiresAt={pixModal.expiresAt}
+          onCancel={() => void cancelPendingPixSale()}
+          onClosePaid={finishPaidPixSale}
+        />
+      )}
       {toast && <div className="toast">{toast}</div>}
       <TeamChat />
     </div>

@@ -20,3 +20,9 @@ npm-debug.log*
 .env
 .env.*
 !.env.example
+
+# Certificados Sicoob (nunca commitar)
+*.pfx
+*.p12
+sicoob-*.pem
+supabase/.temp/

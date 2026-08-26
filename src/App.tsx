@@ -1,8 +1,10 @@
 import { useCallback, useState } from 'react'
 import { isAuthenticated, logout as localLogout } from './auth'
+import { AppUpdateBanner } from './AppUpdateBanner'
 import CloudApp from './CloudApp'
 import { CloudWorkspaceBridge } from './CloudWorkspaceBridge'
-import { isSupabaseConfigured } from './lib/supabase'
+import { ForcePasswordChange } from './ForcePasswordChange'
+import { isSupabaseConfigured, supabase } from './lib/supabase'
 import { useAuth } from './lib/useAuth'
 import { loadCloudSession, saveCloudSession } from './lib/workspace'
 import LocalApp from './LocalApp'
@@ -14,6 +16,7 @@ export default function App() {
   const auth = useAuth()
   const [authed, setAuthed] = useState(() => isAuthenticated())
   const [cloudError, setCloudError] = useState<string | null>(null)
+  const [, setPasswordGateTick] = useState(0)
 
   const onReady = useCallback(() => {
     setCloudError(null)
@@ -28,6 +31,7 @@ export default function App() {
     if (auth.loading) {
       return (
         <div className="auth-shell">
+          <AppUpdateBanner />
           <div className="auth-card panel">
             <p className="brand">RifaPIX</p>
             <p className="hint">Carregando…</p>
@@ -37,6 +41,20 @@ export default function App() {
     }
 
     if (LEGACY_CLOUD && auth.user) return <CloudApp />
+
+    if (auth.user && Boolean(auth.user.user_metadata?.must_change_password)) {
+      return (
+        <>
+          <AppUpdateBanner />
+          <ForcePasswordChange
+            onDone={async () => {
+              await supabase?.auth.refreshSession()
+              setPasswordGateTick((n) => n + 1)
+            }}
+          />
+        </>
+      )
+    }
 
     const cloudSession = loadCloudSession()
     const canEnter = isAuthenticated() || authed
@@ -111,7 +129,12 @@ export default function App() {
       )
     }
 
-    return <LoginScreen onLocalAuthenticated={() => setAuthed(true)} />
+    return (
+      <>
+        <AppUpdateBanner />
+        <LoginScreen onLocalAuthenticated={() => setAuthed(true)} />
+      </>
+    )
   }
 
   if (!authed) return <LoginScreen onLocalAuthenticated={() => setAuthed(true)} />

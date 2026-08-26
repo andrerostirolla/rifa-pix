@@ -2,9 +2,11 @@ import { create } from 'zustand'
 import { createJSONStorage, persist } from 'zustand/middleware'
 import type { ParsedPixRow } from './csvImport'
 import { makeLocalTxid, previewTxidMatches } from './txidMatch'
+import { buildMockPixCopiaECola } from './lib/emvPix'
 import type {
   AmortizationEntry,
   AppState,
+  AuditEntry,
   Block,
   BlockTransfer,
   CashDestination,
@@ -87,7 +89,10 @@ type Store = AppState & {
     receivedNow?: boolean
     blockId?: string
   }) => { ok: true; sale: Sale } | { ok: false; error: string }
-  patchSale: (id: string, patch: Partial<Pick<Sale, 'proofPath' | 'proofImageDataUrl' | 'notes'>>) => void
+  patchSale: (
+    id: string,
+    patch: Partial<Pick<Sale, 'proofPath' | 'proofImageDataUrl' | 'notes' | 'paidAmount' | 'status'>>,
+  ) => void
   removeSale: (id: string) => void
   addPix: (input: {
     amount: number
@@ -114,6 +119,21 @@ type Store = AppState & {
     unmatchedWithTxid: number
   }
   createChargeForSale: (saleId: string, amount?: number) => { ok: true; charge: PixCharge } | { ok: false; error: string }
+  registerPixCharge: (input: {
+    saleId: string
+    txid: string
+    amount: number
+    copyPaste?: string
+    qrCode?: string
+    id?: string
+    provider?: string
+    expiresAt?: string
+  }) => { ok: true; charge: PixCharge } | { ok: false; error: string }
+  settlePixChargeByTxid: (
+    txid: string,
+    amount?: number,
+    saleId?: string,
+  ) => { ok: true; saleId: string } | { ok: false; error: string }
   attachTxidToSale: (
     saleId: string,
     txid: string,
@@ -129,8 +149,15 @@ type Store = AppState & {
     amount: number
     kind: 'dinheiro' | 'pix_vendedor'
     note?: string
+    saleIds?: string[]
   }) => void
+  settleCashSales: (input: {
+    memberId: string
+    saleIds: string[]
+    memberName?: string
+  }) => { ok: true; amount: number } | { ok: false; error: string }
   removeMemberSettlement: (id: string) => void
+  pushAudit: (entry: AuditEntry) => void
   exportSnapshot: () => AppState
   importSnapshot: (data: AppState) => { ok: boolean; error?: string }
   seedDemo: () => void
@@ -148,6 +175,7 @@ const empty: AppState = {
   pixCharges: [],
   memberSettlements: [],
   blockTransfers: [],
+  auditLog: [],
 }
 
 const PERSIST_KEY = 'rifa-pix-v3-blocks'
@@ -447,6 +475,13 @@ export const useStore = create<Store>()(
       },
 
       addSale: (input) => {
+        if (input.paymentMethod === 'pix') {
+          input.pixDestination = input.pixDestination || 'entidade'
+        }
+        if (input.paymentMethod === 'dinheiro') {
+          input.cashDestination = input.cashDestination || 'vendedor'
+        }
+
         const raffle = get().raffles.find((r) => r.id === input.raffleId)
         if (!raffle) return { ok: false, error: 'Selecione a rifa/evento.' }
         if (!get().members.some((m) => m.id === input.memberId && m.active)) {
@@ -454,11 +489,8 @@ export const useStore = create<Store>()(
         }
         if (!input.buyerName.trim()) return { ok: false, error: 'Informe o comprador.' }
         if (!input.numbers.length) return { ok: false, error: 'Selecione ao menos um número.' }
-        if (input.paymentMethod === 'pix' && !input.pixDestination) {
-          return { ok: false, error: 'Informe se o PIX foi para a entidade ou para o vendedor.' }
-        }
-        if (input.paymentMethod === 'dinheiro' && !input.cashDestination) {
-          return { ok: false, error: 'Informe se o dinheiro ficou com o vendedor ou foi pra loja.' }
+        if (input.paymentMethod === 'pix' && input.pixDestination === 'vendedor') {
+          return { ok: false, error: 'PIX do membro deve ser na conta da loja.' }
         }
 
         const allowed = new Set(get().memberNumbers(input.memberId, input.raffleId, input.blockId))
@@ -641,16 +673,63 @@ export const useStore = create<Store>()(
         const open = sale.totalAmount - sale.paidAmount
         if (open <= 0.009) return { ok: false, error: 'Venda já quitada.' }
         const value = amount ?? open
+        const txid = makeLocalTxid()
+        const copyPaste = buildMockPixCopiaECola(value, txid)
         const charge: PixCharge = {
           id: uid(),
           saleId,
-          txid: makeLocalTxid(),
+          txid,
           amount: value,
           status: 'pending',
           createdAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+          copyPaste,
+          qrCode: copyPaste,
+          provider: 'mock',
         }
         set((s) => ({ pixCharges: [charge, ...s.pixCharges] }))
         return { ok: true, charge }
+      },
+
+      registerPixCharge: (input) => {
+        const sale = get().sales.find((s) => s.id === input.saleId)
+        if (!sale) return { ok: false, error: 'Venda não encontrada.' }
+        const charge: PixCharge = {
+          id: input.id || uid(),
+          saleId: input.saleId,
+          txid: input.txid,
+          amount: input.amount,
+          status: 'pending',
+          createdAt: new Date().toISOString(),
+          copyPaste: input.copyPaste,
+          qrCode: input.qrCode || input.copyPaste,
+          provider: input.provider,
+          expiresAt: input.expiresAt,
+        }
+        set((s) => ({ pixCharges: [charge, ...s.pixCharges.filter((c) => c.saleId !== input.saleId || c.status !== 'pending')] }))
+        return { ok: true, charge }
+      },
+
+      settlePixChargeByTxid: (txid, amount, saleId) => {
+        const clean = txid.trim()
+        const charge = get().pixCharges.find((c) => c.txid.toLowerCase() === clean.toLowerCase())
+        const sid = saleId || charge?.saleId
+        if (!sid) return { ok: false, error: 'Cobrança/venda não encontrada para este TXID.' }
+        const sale = get().sales.find((s) => s.id === sid)
+        if (!sale) return { ok: false, error: 'Venda não encontrada.' }
+        const add = amount ?? charge?.amount ?? Math.max(0, sale.totalAmount - sale.paidAmount)
+        const paidAmount = Math.min(sale.totalAmount, Math.max(sale.paidAmount, add))
+        const status = saleStatus(sale.totalAmount, paidAmount)
+        const paidAt = new Date().toISOString()
+        set((s) => ({
+          sales: s.sales.map((x) => (x.id === sid ? { ...x, paidAmount, status } : x)),
+          pixCharges: s.pixCharges.map((c) =>
+            c.txid.toLowerCase() === clean.toLowerCase() || (c.saleId === sid && c.status === 'pending')
+              ? { ...c, status: 'paid' as const, paidAt }
+              : c,
+          ),
+        }))
+        return { ok: true, saleId: sid }
       },
 
       attachTxidToSale: (saleId, txid, amount, proofImageDataUrl) => {
@@ -772,11 +851,59 @@ export const useStore = create<Store>()(
           kind: input.kind,
           note: input.note?.trim() || undefined,
           createdAt: new Date().toISOString(),
+          saleIds: input.saleIds,
         }
         set((s) => ({ memberSettlements: [row, ...s.memberSettlements] }))
       },
 
+      settleCashSales: (input) => {
+        const ids = new Set(input.saleIds)
+        if (!ids.size) return { ok: false, error: 'Selecione ao menos uma venda.' }
+        const pending = get().sales.filter(
+          (sale) =>
+            ids.has(sale.id) &&
+            sale.memberId === input.memberId &&
+            sale.paymentMethod === 'dinheiro' &&
+            (sale.cashDestination || 'vendedor') === 'vendedor' &&
+            !sale.cashSettledAt,
+        )
+        if (!pending.length) return { ok: false, error: 'Nenhuma pendência válida selecionada.' }
+        const amount = Math.round(pending.reduce((a, s) => a + s.totalAmount, 0) * 100) / 100
+        const now = new Date().toISOString()
+        const note = `Baixado e assinado por todos · ADM + ${input.memberName || 'membro'}`
+        const saleIds = pending.map((s) => s.id)
+        const row: MemberSettlement = {
+          id: uid(),
+          memberId: input.memberId,
+          amount,
+          kind: 'dinheiro',
+          note,
+          createdAt: now,
+          saleIds,
+        }
+        set((s) => ({
+          sales: s.sales.map((sale) =>
+            saleIds.includes(sale.id)
+              ? {
+                  ...sale,
+                  cashSettledAt: now,
+                  cashSettlementNote: note,
+                  paidAmount: sale.totalAmount,
+                  status: 'quitado' as const,
+                }
+              : sale,
+          ),
+          memberSettlements: [row, ...s.memberSettlements],
+        }))
+        return { ok: true, amount }
+      },
+
       removeMemberSettlement: (id) => set((s) => ({ memberSettlements: s.memberSettlements.filter((x) => x.id !== id) })),
+
+      pushAudit: (entry) =>
+        set((s) => ({
+          auditLog: [entry, ...(s.auditLog || [])].slice(0, 300),
+        })),
 
       exportSnapshot: () => {
         const s = get()
@@ -791,6 +918,7 @@ export const useStore = create<Store>()(
           pixCharges: s.pixCharges,
           memberSettlements: s.memberSettlements,
           blockTransfers: s.blockTransfers,
+          auditLog: s.auditLog || [],
         }
       },
 
@@ -809,6 +937,7 @@ export const useStore = create<Store>()(
           pixCharges: data.pixCharges || [],
           memberSettlements: data.memberSettlements || [],
           blockTransfers: data.blockTransfers || [],
+          auditLog: data.auditLog || [],
         })
         return { ok: true }
       },
@@ -935,6 +1064,7 @@ export const useStore = create<Store>()(
         ),
         memberSettlements: state.memberSettlements,
         blockTransfers: state.blockTransfers,
+        auditLog: state.auditLog || [],
       }),
       storage: createJSONStorage(() => ({
         getItem: (name) => localStorage.getItem(name),

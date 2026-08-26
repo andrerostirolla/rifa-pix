@@ -9,6 +9,23 @@ Conferência de PIX + amortização para vendas de rifas.
 
 App online (estático): https://andrerostirolla.github.io/rifa-pix/
 
+### Colocar online (acessar de qualquer lugar)
+
+1. No Supabase → **Settings → API**, copie **Project URL** e **anon public** key  
+   Projeto atual: `https://lkoumlpmkubgpjbqyipt.supabase.co`
+2. No GitHub → [Secrets do repo](https://github.com/andrerostirolla/rifa-pix/settings/secrets/actions):
+   - `VITE_SUPABASE_URL` = URL do projeto
+   - `VITE_SUPABASE_ANON_KEY` = anon public key
+3. Na pasta do projeto:
+
+```powershell
+.\scripts\deploy-online.ps1
+```
+
+4. Aguarde o workflow em [Actions](https://github.com/andrerostirolla/rifa-pix/actions) e abra https://andrerostirolla.github.io/rifa-pix/
+
+O frontend fica no GitHub Pages; dados e login ficam no Supabase (Postgres). PIX Sicoob roda nas Edge Functions do Supabase (secrets já configurados).
+
 ## Ligar Supabase (recomendado)
 
 ### Capacidade (plano Free)
@@ -44,22 +61,48 @@ Local opcional: `cp .env.example .env` e preencha as mesmas variáveis.
 - **Chat da equipe:** botão flutuante (canto inferior esquerdo) para ADM e membros falarem no mesmo workspace
 - **Atalho / instalar app:** botão **Instalar app** ou **Add atalho** (login e topo). No celular vira ícone na tela inicial; no PC, atalho/app na área de trabalho (Chrome/Edge)
 
-## Edge Functions (PIX webhook — opcional)
+## Edge Functions (PIX — Sicoob ou mock)
 
 ```bash
 npx supabase login
 npx supabase link --project-ref SEU_REF
-npx supabase secrets set PIX_WEBHOOK_SECRET=um-segredo-forte
 npx supabase functions deploy create-pix-charge
 npx supabase functions deploy pix-webhook --no-verify-jwt
 npx supabase functions deploy simulate-pix-payment
 ```
 
-Webhook URL (PSP/banco):
+### Ligar API Sicoob
+
+1. Portal: https://developers.sicoob.com.br → crie o app **Pix Recebimentos**
+2. Escopos: `cob.write`, `cob.read`, `pix.read`, `webhook.write`, `webhook.read`
+3. Cadastre o certificado (ICP-Brasil A1) e anote o **Client ID** + sua **chave PIX**
+4. No Supabase → **Edge Functions → Secrets**:
+
+```bash
+npx supabase secrets set PIX_PROVIDER=sicoob
+npx supabase secrets set SICOOB_ENV=homol
+npx supabase secrets set SICOOB_CLIENT_ID=seu_client_id
+npx supabase secrets set SICOOB_PIX_KEY=sua-chave-pix
+npx supabase secrets set SICOOB_CERT_PEM="-----BEGIN CERTIFICATE-----
+...
+-----END CERTIFICATE-----"
+npx supabase secrets set SICOOB_KEY_PEM="-----BEGIN PRIVATE KEY-----
+...
+-----END PRIVATE KEY-----"
+npx supabase secrets set PIX_WEBHOOK_SECRET=um-segredo-forte
+```
+
+5. Redeploy das functions depois dos secrets
+6. No portal Sicoob, cadastre o webhook:
 
 `https://SEU_REF.supabase.co/functions/v1/pix-webhook`
 
-Header: `x-webhook-secret: um-segredo-forte`
+(Header opcional `x-webhook-secret` se você setar `PIX_WEBHOOK_REQUIRE_SECRET=1`)
+
+**Homolog:** `SICOOB_ENV=homol`  
+**Produção:** `SICOOB_ENV=prod` + certificado da conta PJ
+
+Sem Sicoob, deixe `PIX_PROVIDER=mock` (QR demo) e use **Simular pagamento**.
 
 ## Equipe (ADM x membro)
 

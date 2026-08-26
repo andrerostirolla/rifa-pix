@@ -87,6 +87,18 @@ export async function loginAdmin(password: string) {
   await createAdminSession()
 }
 
+/** Confirma senha do ADM sem criar nova sessão (ações sensíveis). */
+export async function verifyAdminPassword(password: string) {
+  const record = getAuthRecord()
+  if (!record) {
+    if (password.trim().toUpperCase() === 'CONFIRMAR') return
+    throw new Error('Senha do ADM não configurada neste aparelho. Digite CONFIRMAR ou configure a senha no primeiro acesso.')
+  }
+  if (!password.trim()) throw new Error('Informe a senha do ADM.')
+  const hash = await deriveHash(password, record.salt, record.iterations)
+  if (hash !== record.hash) throw new Error('Senha incorreta.')
+}
+
 async function createAdminSession(organizerName?: string) {
   const tokenBytes = crypto.getRandomValues(new Uint8Array(24))
   const session: SessionRecord = {

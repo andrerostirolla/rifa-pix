@@ -1,9 +1,46 @@
-import { defineConfig } from 'vite'
+import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
+import { writeFileSync, mkdirSync } from 'node:fs'
+import { join } from 'node:path'
+
+/** Gera app-version.json a cada build/dev para forçar celulares a atualizar. */
+function appVersionPlugin(): Plugin {
+  const buildId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  const builtAt = new Date().toISOString()
+  const payload = JSON.stringify({ buildId, builtAt }, null, 2)
+
+  return {
+    name: 'rifapix-app-version',
+    config() {
+      return {
+        define: {
+          __APP_BUILD_ID__: JSON.stringify(buildId),
+        },
+      }
+    },
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        const url = req.url || ''
+        if (url.includes('app-version.json')) {
+          res.setHeader('Content-Type', 'application/json')
+          res.setHeader('Cache-Control', 'no-store')
+          res.end(payload)
+          return
+        }
+        next()
+      })
+    },
+    writeBundle(options) {
+      const outDir = options.dir || join(process.cwd(), 'dist')
+      mkdirSync(outDir, { recursive: true })
+      writeFileSync(join(outDir, 'app-version.json'), payload)
+    },
+  }
+}
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), appVersionPlugin()],
   base: process.env.VITE_BASE || '/rifa-pix/',
   server: {
     host: '0.0.0.0',

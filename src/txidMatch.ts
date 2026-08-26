@@ -56,5 +56,5 @@ export function previewTxidMatches(rows: ParsedPixRow[], charges: ChargeLike[]):
 }
 
 export function makeLocalTxid() {
-  return `rifa${crypto.randomUUID().replace(/-/g, '')}`.slice(0, 25)
+  return `rifa${crypto.randomUUID().replace(/-/g, '')}`.slice(0, 32)
 }

@@ -32,6 +32,18 @@ export function loadCloudSession(): CloudSession | null {
 export function saveCloudSession(session: CloudSession | null) {
   if (!session) sessionStorage.removeItem(CLOUD_SESSION_KEY)
   else sessionStorage.setItem(CLOUD_SESSION_KEY, JSON.stringify(session))
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('rifa-cloud-session', { detail: session }))
+  }
+}
+
+/** Atualiza meta/updatedAt e avisa o bridge (evita “Sem nuvem” após PIX no servidor). */
+export function syncCloudSessionMeta(meta: Partial<WorkspaceMeta> & { updatedAt?: string }) {
+  const session = loadCloudSession()
+  if (!session) return null
+  session.workspace = { ...session.workspace, ...meta }
+  saveCloudSession(session)
+  return session
 }
 
 function mapWorkspace(row: {
@@ -196,4 +208,34 @@ export async function fetchByAccessCode(accessCode: string): Promise<{ meta: Wor
 export function emptyishState(state: AppState | null | undefined): boolean {
   if (!state) return true
   return !(state.raffles?.length || state.members?.length || state.sales?.length || state.blocks?.length)
+}
+
+/** Grava o estado atual na nuvem antes de operações que leem o workspace no servidor. */
+export async function flushWorkspaceToCloud(state: AppState): Promise<void> {
+  const session = loadCloudSession()
+  if (!session) return
+  try {
+    let updatedAt: string
+    if (session.role === 'admin' && session.workspace.id) {
+      updatedAt = await saveOwnerWorkspaceState(session.workspace.id, state)
+    } else {
+      updatedAt = await saveByAccessCode(
+        session.workspace.accessCode,
+        state,
+        session.workspace.updatedAt,
+      )
+    }
+    session.workspace = { ...session.workspace, updatedAt }
+    saveCloudSession(session)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    // Conflito de versão: sobe de novo sem expected (última escrita ganha) ou com peek
+    if (/desatualiz|conflict|updated/i.test(msg)) {
+      const updatedAt = await saveByAccessCode(session.workspace.accessCode, state)
+      session.workspace = { ...session.workspace, updatedAt }
+      saveCloudSession(session)
+      return
+    }
+    throw err
+  }
 }

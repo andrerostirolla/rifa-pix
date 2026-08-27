@@ -11,18 +11,19 @@ export function registerServiceWorker() {
     }
   }
 
-  window.addEventListener('load', () => {
+  const register = () => {
     navigator.serviceWorker
       .register(`${base}sw.js`, { scope: base, updateViaCache: 'none' })
       .then((reg) => {
-        // Força checagem logo e a cada abertura / foco
         void reg.update()
-        window.setInterval(() => void reg.update(), 30_000)
       })
       .catch((err) => {
         console.warn('SW não registrado', err)
       })
-  })
+  }
+
+  register()
+  window.addEventListener('load', () => void tickUpdate())
 
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') void tickUpdate()

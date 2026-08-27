@@ -56,6 +56,7 @@ const auditActionLabel: Record<string, string> = {
   'venda.registrar': 'Registrou venda',
   'venda.dinheiro': 'Venda em dinheiro',
   'venda.pix': 'Venda PIX recebida',
+  'venda.pix_gerada': 'Gerou QR do PIX',
   'venda.contingencia': 'Venda em contingência',
   'venda.pix_cancelada': 'Cancelou PIX (membro)',
   'venda.pix_expirada': 'PIX cancelado por tempo',
@@ -75,6 +76,12 @@ function downloadCsv(filename: string, rows: string[][]) {
   a.download = filename
   a.click()
   URL.revokeObjectURL(url)
+}
+
+/** Percentual curto para os cartões do resumo. */
+function pct(part: number, total: number) {
+  if (!total) return '—'
+  return `${Math.round((part / total) * 100)}%`
 }
 
 /** Linhas do popover de auditoria: usa os campos gravados e cai no texto simples se não houver. */
@@ -468,7 +475,11 @@ export default function LocalApp() {
           dueTotal: cashOpen,
         }
       })
-      .sort((a, b) => b.dueTotal - a.dueTotal || b.expected - a.expected || a.member.name.localeCompare(b.member.name))
+      // Ranking: do maior vendedor para o menor
+      .sort(
+        (a, b) =>
+          b.soldCount - a.soldCount || b.expected - a.expected || a.member.name.localeCompare(b.member.name),
+      )
   }, [members, activeSales, memberSettlements, reportEventId, pixCharges, raffles])
 
   const totals = useMemo(() => {
@@ -502,6 +513,37 @@ export default function LocalApp() {
     () => reports.find((r) => r.member.id === reportMemberId) || null,
     [reports, reportMemberId],
   )
+
+  /** Números globais do evento escolhido (ou de todos) para os cartões do relatório. */
+  const reportGlobals = useMemo(() => {
+    const escolhidos = reportEventId ? raffles.filter((r) => r.id === reportEventId) : raffles
+    const scoped = activeSales.filter((s) => !reportEventId || s.raffleId === reportEventId)
+    let totalNumeros = 0
+    let vendidosQtd = 0
+    let aVenderValor = 0
+    for (const r of escolhidos) {
+      const vend = scoped
+        .filter((s) => s.raffleId === r.id)
+        .reduce((a, s) => a + s.numbers.length, 0)
+      totalNumeros += r.totalNumbers
+      vendidosQtd += vend
+      aVenderValor += Math.max(0, r.totalNumbers - vend) * r.ticketPrice
+    }
+    const pixRecebido = scoped
+      .filter((s) => s.paymentMethod === 'pix' && (s.pixDestination || 'entidade') === 'entidade')
+      .reduce((a, s) => a + s.paidAmount, 0)
+    const dinheiroRecebido = scoped
+      .filter((s) => s.paymentMethod === 'dinheiro' && Boolean(s.cashSettledAt))
+      .reduce((a, s) => a + s.totalAmount, 0)
+    return {
+      esperado: aVenderValor,
+      recebido: pixRecebido + dinheiroRecebido,
+      pixRecebido,
+      dinheiroRecebido,
+      vendidosQtd,
+      totalNumeros,
+    }
+  }, [activeSales, raffles, reportEventId])
 
   const baixaPendingSales = useMemo(() => {
     if (!baixaMemberId) return []
@@ -693,6 +735,19 @@ export default function LocalApp() {
           return
         }
 
+        logAudit('venda.pix_gerada', `${buyerName} · ${brl(totalAmount)} · nº ${formatNumbers(selectedNumbers)}`, {
+          'Forma de pagamento': 'PIX (conta da loja)',
+          Comprador: buyerName,
+          Números: formatNumbers(selectedNumbers),
+          Quantidade: `${selectedNumbers.length} nº`,
+          Valor: brl(totalAmount),
+          TXID: chargeTxid,
+          Provedor: isDemo ? 'Simulado (sem Sicoob)' : 'Sicoob',
+          'QR válido até': expiresAt ? new Date(expiresAt).toLocaleString('pt-BR') : '30 min',
+          Vendedor: members.find((m) => m.id === sellerId)?.name || who,
+          Evento: raffles.find((r) => r.id === raffleId)?.eventName,
+          Situação: 'Aguardando pagamento',
+        })
         setPixPaid(false)
         setPixModal({
           buyerName,
@@ -716,6 +771,7 @@ export default function LocalApp() {
       setProofDataUrl('')
 
       const saleMeta = {
+        'Forma de pagamento': memberCash ? 'Dinheiro' : 'PIX',
         Comprador: buyerName,
         Números: formatNumbers(selectedNumbers),
         Quantidade: `${selectedNumbers.length} nº`,
@@ -794,6 +850,7 @@ export default function LocalApp() {
         {
           Tipo: 'Cancelado por membro',
           Motivo: reason,
+          'Forma de pagamento': 'PIX (não foi pago)',
           Comprador: sale?.buyerName,
           Números: formatNumbers(result.numbers),
           Valor: sale ? brl(sale.totalAmount) : undefined,
@@ -1128,9 +1185,9 @@ export default function LocalApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAdmin, adminTab])
 
-  // QR vencido: venda vira "Cancelada" (fica no histórico riscada) e os números voltam
+  // QR vencido: venda vira "Cancelada" (fica no histórico riscada) e os números voltam.
+  // Roda também no ADM: se o celular do membro estiver fechado, o número ficaria preso.
   useEffect(() => {
-    if (isAdmin) return
     const tick = () => {
       const expired = expireStalePixCharges()
       if (!expired.length) return
@@ -1144,10 +1201,21 @@ export default function LocalApp() {
         'venda.pix_expirada',
         `${expired.length} venda(s) cancelada(s) por tempo${freed.length ? ` · nº ${formatNumbers(freed)} liberado(s)` : ''}`,
         {
-          Tipo: 'Cancelado por tempo',
-          Motivo: 'O QR do PIX venceu sem pagamento',
+          Tipo: 'Cancelado por tempo (o QR venceu)',
+          Motivo: 'Passou o prazo do PIX sem o comprador pagar',
+          'Forma de pagamento': 'PIX (não foi pago)',
           Vendas: `${expired.length}`,
-          Números: freed.length ? formatNumbers(freed) : undefined,
+          Compradores: useStore
+            .getState()
+            .sales.filter((s) => expired.includes(s.id))
+            .map((s) => s.buyerName)
+            .join(', '),
+          TXID: useStore
+            .getState()
+            .pixCharges.filter((c) => c.saleId && expired.includes(c.saleId))
+            .map((c) => c.txid)
+            .join(', '),
+          Números: freed.length ? `${formatNumbers(freed)} (liberados)` : undefined,
         },
       )
       showToast(
@@ -1155,7 +1223,8 @@ export default function LocalApp() {
           ? `PIX expirou sem pagamento. Números ${formatNumbers(freed)} liberados.`
           : 'PIX expirou sem pagamento. Venda cancelada.',
       )
-      void flushWorkspaceToCloud(useStore.getState().exportSnapshot()).catch(() => {})
+      if (isAdmin) requestCloudPush()
+      else void flushWorkspaceToCloud(useStore.getState().exportSnapshot()).catch(() => {})
     }
     tick()
     const id = window.setInterval(tick, 15_000)
@@ -1677,12 +1746,16 @@ export default function LocalApp() {
             </article>
             <article className="summary-card ok">
               <span>Valores em conta</span>
-              <strong>{brl(resumo.emConta)}</strong>
-              <em>PIX da loja + dinheiro já prestado</em>
+              <strong>
+                {brl(resumo.emConta)} <small>{pct(resumo.emConta, resumo.total.valor)}</small>
+              </strong>
+              <em>do vendido · PIX da loja + dinheiro já prestado</em>
             </article>
             <article className="summary-card warn">
               <span>Valores a receber</span>
-              <strong>{brl(resumo.aReceber)}</strong>
+              <strong>
+                {brl(resumo.aReceber)} <small>{pct(resumo.aReceber, resumo.total.valor)}</small>
+              </strong>
               <em>
                 {brl(resumo.comVendedores)} com vendedores · {brl(resumo.pixAberto)} PIX em aberto
               </em>
@@ -1707,17 +1780,16 @@ export default function LocalApp() {
             </article>
             <article className="summary-card">
               <span>Números vendidos</span>
-              <strong>{resumo.vendidosQtd}</strong>
-              <em>
-                {brl(resumo.vendidosValor)}
-                {resumo.totalNumeros
-                  ? ` · ${Math.round((resumo.vendidosQtd / resumo.totalNumeros) * 100)}% do total`
-                  : ''}
-              </em>
+              <strong>
+                {resumo.vendidosQtd} <small>{pct(resumo.vendidosQtd, resumo.totalNumeros)}</small>
+              </strong>
+              <em>{brl(resumo.vendidosValor)} do total de {resumo.totalNumeros} nº</em>
             </article>
             <article className="summary-card">
               <span>Números a vender</span>
-              <strong>{resumo.restanteQtd}</strong>
+              <strong>
+                {resumo.restanteQtd} <small>{pct(resumo.restanteQtd, resumo.totalNumeros)}</small>
+              </strong>
               <em>{brl(resumo.restanteValor)} a arrecadar</em>
             </article>
             <article className="summary-card">
@@ -2907,27 +2979,36 @@ export default function LocalApp() {
             <div className="hero-metrics report-metrics">
               <article className="metric">
                 <span>Esperado</span>
-                <strong>{brl(totals.expected)}</strong>
+                <strong>{brl(reportGlobals.esperado)}</strong>
+                <em>total das rifas menos o já vendido</em>
               </article>
               <article className="metric">
                 <span>Recebido</span>
-                <strong>{brl(totals.received)}</strong>
+                <strong>{brl(reportGlobals.recebido)}</strong>
+                <em>PIX pago + dinheiro prestado</em>
               </article>
               <article className="metric">
                 <span>A prestar (equipe)</span>
                 <strong>{brl(totals.dueTotal)}</strong>
+                <em>dinheiro ainda com os vendedores</em>
               </article>
               <article className="metric">
-                <span>Dinheiro loja</span>
-                <strong>{brl(totals.cashLoja)}</strong>
+                <span>PIX</span>
+                <strong>{brl(reportGlobals.pixRecebido)}</strong>
+                <em>recebido em PIX</em>
               </article>
               <article className="metric">
-                <span>PIX entidade</span>
-                <strong>{brl(totals.pixEntidade)}</strong>
+                <span>Dinheiro</span>
+                <strong>{brl(reportGlobals.dinheiroRecebido)}</strong>
+                <em>recebido em dinheiro</em>
               </article>
               <article className="metric">
                 <span>Números vendidos</span>
-                <strong>{totals.soldCount}</strong>
+                <strong>{reportGlobals.vendidosQtd}</strong>
+                <em>
+                  de {reportGlobals.totalNumeros} nº ·{' '}
+                  {pct(reportGlobals.vendidosQtd, reportGlobals.totalNumeros)}
+                </em>
               </article>
             </div>
           </div>
@@ -2936,45 +3017,66 @@ export default function LocalApp() {
             <div className="panel">
               <div className="panel-head">
                 <div>
-                  <h2>Equipe</h2>
-                  <p>Toque no membro para abrir o dossiê completo. Ordenado por valor a prestar.</p>
+                  <h2>Ranking da equipe</h2>
+                  <p>Do maior para o menor vendedor. Toque no membro para abrir o dossiê completo.</p>
                 </div>
               </div>
               <div className="member-report-list">
-                {reports.map((r) => {
+                {reports.map((r, i) => {
                   const bs = memberBlockStats(r.member.id, reportEventId || undefined)
                   return (
-                    <button
-                      key={r.member.id}
-                      type="button"
-                      className="member-report-row"
-                      onClick={() => {
-                        setReportMemberId(r.member.id)
-                        setReportDetail('resumo')
-                      }}
-                    >
-                      <div className="member-report-main">
-                        <strong>{r.member.name}</strong>
-                        <span className="hint">
-                          {r.saleCount} vendas · {r.soldCount} nº · {bs.blocks} blocos
-                          {bs.openNumbers > 0 ? ` · ${bs.openNumbers} abertos` : ''}
-                        </span>
-                      </div>
-                      <div className="member-report-kpis">
-                        <span>
-                          Esperado
-                          <strong>{brl(r.expected)}</strong>
-                        </span>
-                        <span>
-                          Recebido
-                          <strong>{brl(r.received)}</strong>
-                        </span>
-                        <span className={r.dueTotal > 0 ? 'due' : 'ok'}>
-                          A prestar
-                          <strong>{brl(r.dueTotal)}</strong>
-                        </span>
-                      </div>
-                    </button>
+                    <div key={r.member.id} className="member-report-row">
+                      <button
+                        type="button"
+                        className="member-report-open"
+                        onClick={() => {
+                          setReportMemberId(r.member.id)
+                          setReportDetail('resumo')
+                        }}
+                      >
+                        <div className="member-report-main">
+                          <strong>
+                            <span className={`rank-badge ${i === 0 ? 'rank-top' : ''}`}>{i + 1}º</span>
+                            {r.member.name}
+                          </strong>
+                          <span className="hint">
+                            {r.saleCount} vendas · {r.soldCount} nº · {bs.blocks} blocos
+                            {bs.openNumbers > 0 ? ` · ${bs.openNumbers} abertos` : ''}
+                          </span>
+                        </div>
+                        <div className="member-report-kpis">
+                          <span>
+                            Esperado
+                            <strong>{brl(r.expected)}</strong>
+                          </span>
+                          <span>
+                            Recebido
+                            <strong>{brl(r.received)}</strong>
+                          </span>
+                          <span className={r.dueTotal > 0 ? 'due' : 'ok'}>
+                            A prestar
+                            <strong>{brl(r.dueTotal)}</strong>
+                          </span>
+                        </div>
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-mini btn-settle"
+                        disabled={r.dueTotal <= 0}
+                        title={
+                          r.dueTotal > 0
+                            ? `Baixar ${brl(r.dueTotal)} em dinheiro com ${r.member.name}`
+                            : 'Sem dinheiro pendente com este membro'
+                        }
+                        onClick={() => {
+                          setBaixaMemberId(r.member.id)
+                          setBaixaSelectedIds([])
+                          setAdminTab('amortizacao')
+                        }}
+                      >
+                        Prestar contas
+                      </button>
+                    </div>
                   )
                 })}
                 {reports.length === 0 && <p className="empty">Nenhum membro ativo.</p>}

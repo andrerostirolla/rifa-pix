@@ -842,7 +842,7 @@ export const useStore = create<Store>()(
           const sales = s.sales.map((sale) => {
             if (!hitSaleIds.has(sale.id) || sale.cancelledAt || sale.status === 'quitado') return sale
             expiredSaleIds.push(sale.id)
-            return { ...sale, cancelledAt: at, cancelReason: 'expirado' as const }
+            return { ...sale, cancelledAt: at, cancelReason: 'expirado' as const, paidAmount: 0 }
           })
           if (!expiredSaleIds.length) return { pixCharges }
           return { pixCharges, sales }

@@ -409,6 +409,12 @@ tbody tr.sale-cancelled:hover > td {
   line-height: 1.2;
 }
 
+.summary-card strong small {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
 .summary-card em {
   font-style: normal;
   font-size: 0.76rem;
@@ -1008,22 +1014,69 @@ button.block-card {
 }
 
 .member-report-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  display: flex;
   gap: 0.75rem;
   align-items: center;
-  text-align: left;
   width: 100%;
   padding: 0.85rem 1rem;
   border-radius: 14px;
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.78);
-  cursor: pointer;
 }
 
 .member-report-row:hover {
   border-color: rgba(15, 122, 95, 0.45);
   background: rgba(15, 122, 95, 0.06);
+}
+
+.member-report-open {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: 0.75rem;
+  align-items: center;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.rank-badge {
+  display: inline-block;
+  margin-right: 0.4rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  background: rgba(93, 113, 104, 0.14);
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+.rank-badge.rank-top {
+  background: rgba(15, 122, 95, 0.16);
+  color: var(--accent-deep, #0f7a5f);
+}
+
+.btn-settle {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.btn-settle:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.metric em {
+  display: block;
+  margin-top: 0.15rem;
+  font-style: normal;
+  font-size: 0.72rem;
+  color: var(--muted);
 }
 
 .member-report-main {
@@ -1303,6 +1356,10 @@ button.block-card {
   }
 
   .member-report-row {
+    flex-wrap: wrap;
+  }
+
+  .member-report-open {
     grid-template-columns: 1fr;
   }
 

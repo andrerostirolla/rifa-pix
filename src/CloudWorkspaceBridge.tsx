@@ -18,6 +18,7 @@ import {
   type CloudSession,
 } from './lib/workspace'
 import { offloadEmbeddedProofs } from './lib/proofs'
+import { formatErr, isNetworkError, translateAuthErr } from './lib/errors'
 import { pingNetwork } from './lib/netPing'
 import { clearPendingSalesPresentIn, useStore } from './store'
 import type { AppState } from './types'

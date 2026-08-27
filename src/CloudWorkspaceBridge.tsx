@@ -19,7 +19,7 @@ import {
 } from './lib/workspace'
 import { offloadEmbeddedProofs } from './lib/proofs'
 import { formatErr, isNetworkError, translateAuthErr } from './lib/errors'
-import { useStore } from './store'
+import { clearPendingSalesPresentIn, useStore } from './store'
 import type { AppState } from './types'
 
 type Props = {
@@ -39,8 +39,6 @@ const CONTINGENCY_RETRY_MS = 30_000
 const BACKGROUND_RETRY_MS = 60_000
 /** Sem resposta da nuvem: derruba a chamada para o app não ficar preso em "salvando". */
 const NET_TIMEOUT_MS = 15_000
-/** Folga de relógio entre aparelhos ao decidir o que ainda não subiu. */
-const CLOCK_SKEW_MS = 5_000
 /** Tempo máximo que um cadeado de sync pode ficar preso antes de ser liberado à força. */
 const LOCK_MAX_MS = 50_000
 
@@ -94,41 +92,7 @@ function mergeContingencyState(remote: AppState, local: AppState): AppState {
     ...remote,
     sales: [...salesById.values()],
     pixCharges: [...chargesById.values()],
-    auditLog: auditMerged.slice(0, 500),
-  }
-}
-
-/**
- * Vendas feitas neste aparelho depois do último sync (contingência) não podem ser
- * apagadas por um pull: elas ainda não existem na nuvem e seriam perdidas.
- */
-function carryUnsyncedLocal(
-  remote: AppState,
-  local: AppState,
-  syncedAtIso: string,
-): { state: AppState; carried: number } {
-  const cut = syncedAtIso ? new Date(syncedAtIso).getTime() - CLOCK_SKEW_MS : NaN
-  if (!Number.isFinite(cut)) return { state: remote, carried: 0 }
-
-  const remoteSales = new Set((remote.sales || []).map((s) => s.id))
-  const pending = (local.sales || []).filter(
-    (s) => !remoteSales.has(s.id) && new Date(s.createdAt).getTime() > cut,
-  )
-  if (!pending.length) return { state: remote, carried: 0 }
-
-  const pendingSaleIds = new Set(pending.map((s) => s.id))
-  const remoteCharges = new Set((remote.pixCharges || []).map((c) => c.id))
-  const charges = (local.pixCharges || []).filter(
-    (c) => !remoteCharges.has(c.id) && c.saleId && pendingSaleIds.has(c.saleId),
-  )
-
-  return {
-    state: {
-      ...remote,
-      sales: [...(remote.sales || []), ...pending],
-      pixCharges: [...(remote.pixCharges || []), ...charges],
-    },
-    carried: pending.length,
+    auditLog: auditMerged,
   }
 }
 
@@ -161,11 +125,14 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
   }
 
   const applyRemote = (state: AppState, updatedAt: string, meta?: Partial<CloudSession['workspace']>) => {
-    const { state: merged, carried } = carryUnsyncedLocal(state, snapshotFromStore(), updatedAtRef.current)
+    const local = snapshotFromStore()
+    const merged = mergeContingencyState(state, local)
+    const remoteIds = new Set((state.sales || []).map((s) => s.id))
     applyingRemoteRef.current = true
-    // Se sobrou venda de contingência para subir, o aparelho continua "sujo"
-    dirtyRef.current = carried > 0
     useStore.getState().importSnapshot(merged)
+    const after = useStore.getState().sales
+    const extra = after.filter((s) => !remoteIds.has(s.id)).length
+    dirtyRef.current = extra > 0
     updatedAtRef.current = updatedAt
     const session = sessionRef.current
     if (session) {
@@ -175,7 +142,7 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
     }
     window.setTimeout(() => {
       applyingRemoteRef.current = false
-      if (carried > 0) void pushNow()
+      if (extra > 0) void pushNow()
     }, 400)
   }
 
@@ -285,6 +252,7 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
       skipPullUntilRef.current = Date.now() + 350
       setStatus('sincronizado')
       setSyncError(null)
+      clearPendingSalesPresentIn(snapshotFromStore().sales)
       void broadcastUpdated(updatedAt)
     } catch (err) {
       const msg = formatErr(err, 'Falha ao salvar')
@@ -509,6 +477,14 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
             }
           } catch (migErr) {
             console.warn('Migração de comprovantes ignorada no boot', migErr)
+          }
+
+          // Vendas que a auditoria tem e o snapshot da nuvem perdeu (contingência)
+          const before = new Set(snapshotFromStore().sales.map((s) => s.id))
+          useStore.getState().importSnapshot(snapshotFromStore())
+          if (snapshotFromStore().sales.some((s) => !before.has(s.id))) {
+            dirtyRef.current = true
+            await pushNow()
           }
         }
 

@@ -48,6 +48,128 @@ function mergeAudit(remote: AuditEntry[] = [], local: AuditEntry[] = []): AuditE
   return [...byId.values()].sort((a, b) => String(b.at).localeCompare(String(a.at))).slice(0, AUDIT_MAX)
 }
 
+function pickSale(a: Sale, b: Sale): Sale {
+  if (a.cancelledAt && !b.cancelledAt) return a
+  if (b.cancelledAt && !a.cancelledAt) return b
+  if (Boolean(a.cashSettledAt) !== Boolean(b.cashSettledAt)) return a.cashSettledAt ? a : b
+  if ((a.paidAmount || 0) !== (b.paidAmount || 0)) return (a.paidAmount || 0) > (b.paidAmount || 0) ? a : b
+  return a
+}
+
+/** Une vendas por id — contingência local não pode sumir num pull da nuvem. */
+function mergeSales(remote: Sale[] = [], local: Sale[] = []): Sale[] {
+  const byId = new Map<string, Sale>()
+  for (const s of remote) if (s?.id) byId.set(s.id, s)
+  for (const s of local) {
+    if (!s?.id) continue
+    const cur = byId.get(s.id)
+    byId.set(s.id, cur ? pickSale(cur, s) : s)
+  }
+  return [...byId.values()].sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+}
+
+function mergeCharges(remote: PixCharge[] = [], local: PixCharge[] = []): PixCharge[] {
+  const byId = new Map<string, PixCharge>()
+  for (const c of remote) if (c?.id) byId.set(c.id, c)
+  for (const c of local) if (c?.id && !byId.has(c.id)) byId.set(c.id, c)
+  return [...byId.values()]
+}
+
+const PENDING_SALES_KEY = 'rifa-pix-pending-sales-v1'
+
+function loadPendingSales(): Sale[] {
+  try {
+    const raw = localStorage.getItem(PENDING_SALES_KEY)
+    const list = raw ? (JSON.parse(raw) as Sale[]) : []
+    return Array.isArray(list) ? list.filter((s) => s?.id) : []
+  } catch {
+    return []
+  }
+}
+
+function savePendingSales(sales: Sale[]) {
+  try {
+    localStorage.setItem(PENDING_SALES_KEY, JSON.stringify(sales.slice(0, 300)))
+  } catch {
+    /* quota */
+  }
+}
+
+function rememberPendingSale(sale: Sale) {
+  const list = loadPendingSales().filter((s) => s.id !== sale.id)
+  list.unshift(sale)
+  savePendingSales(list)
+}
+
+export function clearPendingSalesPresentIn(cloudSales: Sale[]) {
+  const ids = new Set((cloudSales || []).map((s) => s.id))
+  savePendingSales(loadPendingSales().filter((s) => !ids.has(s.id)))
+}
+
+function parseNumbersMeta(raw?: string): number[] {
+  if (!raw) return []
+  return raw
+    .split(/[^\d]+/)
+    .map((x) => Number(x))
+    .filter((n) => Number.isFinite(n) && n > 0)
+}
+
+function parseBrlMeta(raw?: string): number {
+  if (!raw) return 0
+  const t = raw.replace(/[R$\s.]/g, '').replace(',', '.')
+  const n = Number(t)
+  return Number.isFinite(n) ? n : 0
+}
+
+const SALE_AUDIT_ACTIONS = new Set(['venda.contingencia', 'venda.dinheiro', 'venda.pix'])
+
+/** Recria venda que a auditoria registrou mas o snapshot da nuvem perdeu no sync. */
+function salesFromAudit(
+  audit: AuditEntry[],
+  sales: Sale[],
+  members: Member[],
+  raffles: Raffle[],
+): Sale[] {
+  const haveId = new Set(sales.map((s) => s.id))
+  const taken = new Set(sales.filter((s) => !s.cancelledAt).flatMap((s) => s.numbers))
+  const extra: Sale[] = []
+  for (const e of audit || []) {
+    if (!SALE_AUDIT_ACTIONS.has(e.action)) continue
+    const saleId = e.ref?.saleId
+    if (saleId && haveId.has(saleId)) continue
+    const nums = parseNumbersMeta(e.meta?.Números)
+    if (!nums.length) continue
+    if (nums.some((n) => taken.has(n))) continue
+    const member =
+      members.find((m) => m.name === e.meta?.Vendedor) || members.find((m) => m.name === e.actorName)
+    const raffle = raffles.find((r) => r.eventName === e.meta?.Evento || r.name === e.meta?.Evento) || raffles[0]
+    if (!member || !raffle) continue
+    const amount = parseBrlMeta(e.meta?.Valor) || nums.length * raffle.ticketPrice
+    const paymentMethod: Sale['paymentMethod'] =
+      e.action === 'venda.pix' || /^pix/i.test(e.meta?.['Forma de pagamento'] || '') ? 'pix' : 'dinheiro'
+    const paid = paymentMethod === 'dinheiro' || e.action === 'venda.pix' ? amount : 0
+    const sale: Sale = {
+      id: saleId || `audit-${e.id}`,
+      raffleId: raffle.id,
+      memberId: member.id,
+      buyerName: e.meta?.Comprador || 'Comprador',
+      numbers: nums,
+      totalAmount: amount,
+      paidAmount: paid,
+      status: saleStatus(amount, paid),
+      paymentMethod,
+      pixDestination: paymentMethod === 'pix' ? 'entidade' : undefined,
+      cashDestination: paymentMethod === 'dinheiro' ? 'vendedor' : undefined,
+      notes: e.action === 'venda.contingencia' ? 'Recuperada da auditoria (contingência)' : undefined,
+      createdAt: e.at,
+    }
+    extra.push(sale)
+    haveId.add(sale.id)
+    nums.forEach((n) => taken.add(n))
+  }
+  return extra
+}
+
 /** Texto único do cancelamento, usado na lista do membro, em Vendas e na tela TXID. */
 export function cancelInfo(sale?: Sale | null, charge?: PixCharge | null) {
   if (!sale?.cancelledAt) return null
@@ -620,6 +742,7 @@ export const useStore = create<Store>()(
           sales: [sale, ...s.sales],
           pixCharges: charge ? [charge, ...s.pixCharges] : s.pixCharges,
         }))
+        rememberPendingSale(sale)
         return { ok: true, sale }
       },
 
@@ -630,6 +753,7 @@ export const useStore = create<Store>()(
 
       removeSale: (id) =>
         set((s) => {
+          savePendingSales(loadPendingSales().filter((p) => p.id !== id))
           const linked = s.amortizations.filter((a) => a.saleId === id)
           const pixAdjust = new Map<string, number>()
           for (const a of linked) {
@@ -1091,19 +1215,23 @@ export const useStore = create<Store>()(
         if (!data || !Array.isArray(data.raffles) || !Array.isArray(data.sales)) {
           return { ok: false, error: 'Backup inválido.' }
         }
+        const members = data.members || []
+        const raffles = data.raffles
+        const auditLog = mergeAudit(data.auditLog, get().auditLog)
+        const base = mergeSales(data.sales, mergeSales(get().sales, loadPendingSales()))
+        const sales = mergeSales(base, salesFromAudit(auditLog, base, members, raffles))
         set({
-          raffles: data.raffles,
-          members: data.members || [],
+          raffles,
+          members,
           blocks: data.blocks || [],
           numberRanges: data.numberRanges || [],
-          sales: data.sales,
+          sales,
           pixPayments: data.pixPayments || [],
           amortizations: data.amortizations || [],
-          pixCharges: data.pixCharges || [],
+          pixCharges: mergeCharges(data.pixCharges || [], get().pixCharges),
           memberSettlements: data.memberSettlements || [],
           blockTransfers: data.blockTransfers || [],
-          // Nunca substitui o rastro: mescla para não perder ação de outro aparelho
-          auditLog: mergeAudit(data.auditLog, get().auditLog),
+          auditLog,
         })
         return { ok: true }
       },

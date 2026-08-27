@@ -161,6 +161,7 @@ function salesFromAudit(
       pixDestination: paymentMethod === 'pix' ? 'entidade' : undefined,
       cashDestination: paymentMethod === 'dinheiro' ? 'vendedor' : undefined,
       notes: e.action === 'venda.contingencia' ? 'Recuperada da auditoria (contingência)' : undefined,
+      soldOffline: e.action === 'venda.contingencia' || undefined,
       createdAt: e.at,
     }
     extra.push(sale)
@@ -271,6 +272,7 @@ type Store = AppState & {
     pixDestination?: PixDestination
     cashDestination?: CashDestination
     notes?: string
+    soldOffline?: boolean
     proofTxid?: string
     proofImageDataUrl?: string
     proofPath?: string
@@ -716,6 +718,7 @@ export const useStore = create<Store>()(
           pixDestination: input.paymentMethod === 'pix' ? input.pixDestination : undefined,
           cashDestination: input.paymentMethod === 'dinheiro' ? input.cashDestination : undefined,
           notes: input.notes?.trim() || undefined,
+          soldOffline: input.soldOffline || undefined,
           createdAt: new Date().toISOString(),
           blockId: input.blockId,
           proofPath: input.proofPath || undefined,
@@ -1400,6 +1403,7 @@ export const useStore = create<Store>()(
             paymentMethod: s.paymentMethod || 'pix',
             cashDestination:
               s.paymentMethod === 'dinheiro' ? s.cashDestination || ('vendedor' as const) : s.cashDestination,
+            soldOffline: s.soldOffline || /contingenc/i.test(s.notes || '') || undefined,
           })),
           pixPayments: p.pixPayments || [],
           amortizations: p.amortizations || [],

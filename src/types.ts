@@ -72,6 +72,8 @@ export interface Sale {
   cashDestination?: CashDestination
   notes?: string
   createdAt: string
+  /** Venda feita sem nuvem (dinheiro em contingência) */
+  soldOffline?: boolean
   /** Bloco de origem da venda, quando aplicável */
   blockId?: string
   /** Comprovante no Storage (caminho no bucket) */

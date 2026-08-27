@@ -534,33 +534,6 @@ export default function LocalApp() {
       )
   }, [members, activeSales, sales, memberSettlements, reportEventId, pixCharges, raffles])
 
-  const totals = useMemo(() => {
-    return reports.reduce(
-      (acc, r) => ({
-        expected: acc.expected + r.expected,
-        received: acc.received + r.received,
-        cashLoja: acc.cashLoja + r.cashLoja,
-        cashVendedorOpen: acc.cashVendedorOpen + r.cashOpen,
-        pixEntidade: acc.pixEntidade + r.pixEntidade,
-        pixVendedorOpen: acc.pixVendedorOpen + r.pixVendedorOpen,
-        soldCount: acc.soldCount + r.soldCount,
-        saleCount: acc.saleCount + r.saleCount,
-        dueTotal: acc.dueTotal + r.dueTotal,
-      }),
-      {
-        expected: 0,
-        received: 0,
-        cashLoja: 0,
-        cashVendedorOpen: 0,
-        pixEntidade: 0,
-        pixVendedorOpen: 0,
-        soldCount: 0,
-        saleCount: 0,
-        dueTotal: 0,
-      },
-    )
-  }, [reports])
-
   const selectedReport = useMemo(
     () => reports.find((r) => r.member.id === reportMemberId) || null,
     [reports, reportMemberId],
@@ -582,13 +555,21 @@ export default function LocalApp() {
       aVenderValor += Math.max(0, r.totalNumbers - vend) * r.ticketPrice
     }
     const vendidoValor = scoped.reduce((a, s) => a + s.totalAmount, 0)
-    const pixRecebido = scoped
-      .filter((s) => s.paymentMethod === 'pix' && (s.pixDestination || 'entidade') === 'entidade')
+    const pixSales = scoped.filter((s) => s.paymentMethod === 'pix')
+    const cashSales = scoped.filter((s) => s.paymentMethod === 'dinheiro')
+    const pixRecebido = pixSales
+      .filter((s) => (s.pixDestination || 'entidade') === 'entidade')
       .reduce((a, s) => a + s.paidAmount, 0)
-    const dinheiroRecebido = scoped
-      .filter((s) => s.paymentMethod === 'dinheiro' && Boolean(s.cashSettledAt))
-      .reduce((a, s) => a + s.totalAmount, 0)
-    const recebido = pixRecebido + dinheiroRecebido
+    const dinheiroRecebido = cashSales.reduce((a, s) => a + s.totalAmount, 0)
+    const pixNumeros = pixSales.reduce((a, s) => a + s.numbers.length, 0)
+    const dinheiroNumeros = cashSales.reduce((a, s) => a + s.numbers.length, 0)
+    const recebido =
+      pixRecebido + cashSales.filter((s) => Boolean(s.cashSettledAt)).reduce((a, s) => a + s.totalAmount, 0)
+    const aPrestar = cashSales.filter((s) => !s.cashSettledAt).reduce((a, s) => a + s.totalAmount, 0)
+    const contingenciaNumeros = scoped
+      .filter((s) => s.soldOffline || /contingenc/i.test(s.notes || ''))
+      .reduce((a, s) => a + s.numbers.length, 0)
+    const onlineNumeros = Math.max(0, vendidosQtd - contingenciaNumeros)
 
     const canceladas = sales.filter(
       (s) => s.cancelledAt && (!reportEventId || s.raffleId === reportEventId),
@@ -601,9 +582,13 @@ export default function LocalApp() {
       aVenderQtd: Math.max(0, totalNumeros - vendidosQtd),
       vendidoValor,
       recebido,
-      aReceber: Math.max(0, Math.round((vendidoValor - recebido) * 100) / 100),
+      aPrestar: Math.round(aPrestar * 100) / 100,
       pixRecebido,
       dinheiroRecebido,
+      pixNumeros,
+      dinheiroNumeros,
+      contingenciaNumeros,
+      onlineNumeros,
       vendidosQtd,
       totalNumeros,
       cancMembro: {
@@ -716,6 +701,7 @@ export default function LocalApp() {
         pixDestination: paymentMethod === 'pix' ? resolvedPixDest : undefined,
         cashDestination: paymentMethod === 'dinheiro' ? resolvedCashDest : undefined,
         notes,
+        soldOffline: Boolean(offlineContingency && paymentMethod === 'dinheiro'),
         proofTxid: memberPix ? '' : String(fd.get('proofTxid') || ''),
         proofPath,
         proofImageDataUrl,
@@ -3167,27 +3153,46 @@ export default function LocalApp() {
               <article className="metric">
                 <span>Recebido</span>
                 <strong>{brl(reportGlobals.recebido)}</strong>
-                <em>PIX pago + dinheiro prestado</em>
+                <em>PIX na loja + dinheiro já prestado</em>
               </article>
               <article className="metric">
-                <span>A receber</span>
-                <strong>{brl(reportGlobals.aReceber)}</strong>
-                <em>vendido que ainda não entrou</em>
-              </article>
-              <article className="metric">
-                <span>A prestar (equipe)</span>
-                <strong>{brl(totals.dueTotal)}</strong>
+                <span>A receber — a prestar contas</span>
+                <strong>{brl(reportGlobals.aPrestar)}</strong>
                 <em>dinheiro ainda com os vendedores</em>
               </article>
               <article className="metric">
-                <span>PIX</span>
+                <span>Recebido em PIX</span>
                 <strong>{brl(reportGlobals.pixRecebido)}</strong>
-                <em>recebido em PIX</em>
+                <em>
+                  {reportGlobals.pixNumeros} nº em PIX ·{' '}
+                  {pct(reportGlobals.pixNumeros, reportGlobals.totalNumeros)} de{' '}
+                  {reportGlobals.totalNumeros} nº
+                </em>
               </article>
               <article className="metric">
-                <span>Dinheiro</span>
+                <span>Recebido em dinheiro</span>
                 <strong>{brl(reportGlobals.dinheiroRecebido)}</strong>
-                <em>recebido em dinheiro</em>
+                <em>
+                  {reportGlobals.dinheiroNumeros} nº em dinheiro ·{' '}
+                  {pct(reportGlobals.dinheiroNumeros, reportGlobals.totalNumeros)} de{' '}
+                  {reportGlobals.totalNumeros} nº
+                </em>
+              </article>
+              <article className="metric">
+                <span>Números em contingência</span>
+                <strong>{reportGlobals.contingenciaNumeros}</strong>
+                <em>
+                  {pct(reportGlobals.contingenciaNumeros, reportGlobals.totalNumeros)} de{' '}
+                  {reportGlobals.totalNumeros} nº · sem rede no momento da venda
+                </em>
+              </article>
+              <article className="metric">
+                <span>Números vendidos online</span>
+                <strong>{reportGlobals.onlineNumeros}</strong>
+                <em>
+                  {pct(reportGlobals.onlineNumeros, reportGlobals.totalNumeros)} de{' '}
+                  {reportGlobals.totalNumeros} nº · com nuvem no momento da venda
+                </em>
               </article>
               <article className="metric">
                 <span>Cancelados por membro</span>

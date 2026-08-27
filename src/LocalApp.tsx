@@ -17,6 +17,7 @@ import { PixChargeModal } from './PixChargeModal'
 import { SettlementConfirmModal } from './SettlementConfirmModal'
 import { AdminConfirmModal } from './AdminConfirmModal'
 import { CancelReasonModal } from './CancelReasonModal'
+import { MemberEditModal } from './MemberEditModal'
 import { InfoPopover } from './InfoPopover'
 import { adminCredentialHint, verifyAdminCredential } from './lib/adminGuard'
 import { formatErr } from './lib/errors'
@@ -46,6 +47,7 @@ const statusLabel: Record<PaymentStatus, string> = {
 
 const auditActionLabel: Record<string, string> = {
   'membro.criar': 'Salvou membro',
+  'membro.editar': 'Editou membro',
   'membro.remover': 'Removeu membro',
   'membro.acesso_total': 'Deu acesso total (ADM)',
   'bloco.atribuir': 'Atribuiu bloco',
@@ -194,6 +196,8 @@ export default function LocalApp() {
   const [auditQuery, setAuditQuery] = useState('')
   const [cancelAsk, setCancelAsk] = useState<{ saleId: string; fromModal: boolean } | null>(null)
   const [cancelBusy, setCancelBusy] = useState(false)
+  const [editMemberId, setEditMemberId] = useState<string | null>(null)
+  const [editMemberError, setEditMemberError] = useState<string | null>(null)
   const [fullAccess, setFullAccess] = useState(false)
   const [openBlockId, setOpenBlockId] = useState<string | null>(null)
   const [openEventId, setOpenEventId] = useState<string | null>(null)
@@ -233,6 +237,7 @@ export default function LocalApp() {
   const removeRaffle = useStore((s) => s.removeRaffle)
   const addMember = useStore((s) => s.addMember)
   const removeMember = useStore((s) => s.removeMember)
+  const updateMember = useStore((s) => s.updateMember)
   const assignBlock = useStore((s) => s.assignBlock)
   const transferBlock = useStore((s) => s.transferBlock)
   const unassignBlock = useStore((s) => s.unassignBlock)
@@ -1715,27 +1720,37 @@ export default function LocalApp() {
               <strong>{members.length}</strong>
               <em>{resumo.maisVendeu ? `${resumo.maisVendeu.name} lidera as vendas` : 'sem vendas ainda'}</em>
             </article>
-            <article className="summary-card">
+            <article className="summary-card pink-1">
               <span>Vendas hoje</span>
               <strong>{resumo.hoje.qtd}</strong>
               <em>{brl(resumo.hoje.valor)}</em>
             </article>
-            <article className="summary-card">
+            <article className="summary-card pink-2">
               <span>Vendas na semana</span>
               <strong>{resumo.semana.qtd}</strong>
               <em>{brl(resumo.semana.valor)} · últimos 7 dias</em>
             </article>
-            <article className="summary-card">
+            <article className="summary-card pink-3">
               <span>Vendas no mês</span>
               <strong>{resumo.mes.qtd}</strong>
               <em>{brl(resumo.mes.valor)}</em>
             </article>
-            <article className="summary-card">
+            <article className="summary-card pink-4">
               <span>Vendas no total</span>
               <strong>{resumo.total.qtd}</strong>
               <em>{brl(resumo.total.valor)}</em>
             </article>
-            <article className="summary-card">
+            <article
+              className={`summary-card ${
+                resumo.diasSorteio == null
+                  ? ''
+                  : resumo.diasSorteio <= 30
+                    ? 'prazo-urgente'
+                    : resumo.diasSorteio <= 60
+                      ? 'prazo-atencao'
+                      : 'prazo-tranquilo'
+              }`}
+            >
               <span>Dias para o sorteio</span>
               <strong>{resumo.diasSorteio == null ? '—' : resumo.diasSorteio}</strong>
               <em>
@@ -1751,7 +1766,7 @@ export default function LocalApp() {
               </strong>
               <em>do vendido · PIX da loja + dinheiro já prestado</em>
             </article>
-            <article className="summary-card warn">
+            <article className="summary-card receber">
               <span>Valores a receber</span>
               <strong>
                 {brl(resumo.aReceber)} <small>{pct(resumo.aReceber, resumo.total.valor)}</small>
@@ -1760,7 +1775,7 @@ export default function LocalApp() {
                 {brl(resumo.comVendedores)} com vendedores · {brl(resumo.pixAberto)} PIX em aberto
               </em>
             </article>
-            <article className="summary-card">
+            <article className="summary-card roxo">
               <span>Membro que mais vendeu</span>
               <strong>{resumo.maisVendeu?.name || '—'}</strong>
               <em>
@@ -1769,7 +1784,7 @@ export default function LocalApp() {
                   : 'sem vendas'}
               </em>
             </article>
-            <article className="summary-card">
+            <article className="summary-card amarelo">
               <span>Membro que menos vendeu</span>
               <strong>{resumo.menosVendeu?.name || '—'}</strong>
               <em>
@@ -1778,14 +1793,14 @@ export default function LocalApp() {
                   : 'precisa de 2+ membros'}
               </em>
             </article>
-            <article className="summary-card">
+            <article className="summary-card azul">
               <span>Números vendidos</span>
               <strong>
                 {resumo.vendidosQtd} <small>{pct(resumo.vendidosQtd, resumo.totalNumeros)}</small>
               </strong>
               <em>{brl(resumo.vendidosValor)} do total de {resumo.totalNumeros} nº</em>
             </article>
-            <article className="summary-card">
+            <article className="summary-card vermelho-medio">
               <span>Números a vender</span>
               <strong>
                 {resumo.restanteQtd} <small>{pct(resumo.restanteQtd, resumo.totalNumeros)}</small>
@@ -2167,7 +2182,19 @@ export default function LocalApp() {
                 const st = memberBlockStats(m.id, filterEventId || undefined)
                 return (
                   <article key={m.id} className="member-card">
-                    <strong>{m.name}</strong>
+                    <div className="member-card-head">
+                      <strong>{m.name}</strong>
+                      <button
+                        type="button"
+                        className="btn btn-mini btn-ghost"
+                        onClick={() => {
+                          setEditMemberError(null)
+                          setEditMemberId(m.id)
+                        }}
+                      >
+                        Editar
+                      </button>
+                    </div>
                     <div className="hint">PIN {m.pin}</div>
                     <div className="hint">
                       Eventos: {events.length ? events.join(', ') : 'nenhum bloco neste filtro'}
@@ -3668,6 +3695,43 @@ export default function LocalApp() {
           onNewSale={isAdmin ? undefined : keepPixAndStartNewSale}
         />
       )}
+      {editMemberId && (() => {
+        const m = members.find((x) => x.id === editMemberId)
+        if (!m) return null
+        return (
+          <MemberEditModal
+            member={m}
+            error={editMemberError}
+            onCancel={() => {
+              setEditMemberId(null)
+              setEditMemberError(null)
+            }}
+            onSave={(patch) => {
+              const nameTaken = members.some(
+                (x) => x.id !== m.id && x.name.trim().toLowerCase() === patch.name.toLowerCase(),
+              )
+              if (nameTaken) return setEditMemberError('Já existe outro membro com esse nome.')
+              const mudou = [
+                patch.name !== m.name ? `nome: ${m.name} → ${patch.name}` : null,
+                (patch.phone || '') !== (m.phone || '') ? 'WhatsApp alterado' : null,
+                patch.pin !== m.pin ? 'PIN alterado' : null,
+              ].filter(Boolean)
+              updateMember(m.id, patch)
+              logAudit('membro.editar', `${patch.name} · ${mudou.join(', ')}`, {
+                Membro: patch.name,
+                'Nome anterior': patch.name !== m.name ? m.name : undefined,
+                WhatsApp: patch.phone || 'sem WhatsApp',
+                PIN: patch.pin !== m.pin ? 'Trocado (não é gravado no log)' : 'Sem mudança',
+                Alterações: mudou.join(', '),
+              })
+              setEditMemberId(null)
+              setEditMemberError(null)
+              requestCloudPush()
+              showToast(`Membro ${patch.name} atualizado.`)
+            }}
+          />
+        )
+      })()}
       {cancelAsk && (() => {
         const sale = sales.find((s) => s.id === cancelAsk.saleId)
         if (!sale) return null

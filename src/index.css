@@ -422,13 +422,81 @@ tbody tr.sale-cancelled:hover > td {
 }
 
 .summary-card.ok {
-  border-color: rgba(15, 122, 95, 0.35);
-  background: rgba(15, 122, 95, 0.06);
+  border-color: rgba(15, 122, 95, 0.4);
+  background: rgba(15, 122, 95, 0.09);
 }
 
-.summary-card.warn {
-  border-color: rgba(183, 110, 0, 0.35);
-  background: rgba(183, 110, 0, 0.06);
+/* Vendas: rosa clareando do dia para o total */
+.summary-card.pink-1 {
+  border-color: #f6d9e4;
+  background: #fdf3f7;
+}
+
+.summary-card.pink-2 {
+  border-color: #f1c4d6;
+  background: #fbe8f0;
+}
+
+.summary-card.pink-3 {
+  border-color: #e9aac4;
+  background: #f7dbe7;
+}
+
+.summary-card.pink-4 {
+  border-color: #dd8cae;
+  background: #f2c9dc;
+}
+
+/* Prazo do sorteio: azul tranquilo, laranja em 60 dias, vermelho em 30 */
+.summary-card.prazo-tranquilo {
+  border-color: #b8d4ea;
+  background: #eaf3fb;
+}
+
+.summary-card.prazo-atencao {
+  border-color: #f0c48a;
+  background: #fdf0dd;
+}
+
+.summary-card.prazo-urgente {
+  border-color: #eaa9a2;
+  background: #fbe4e1;
+}
+
+.summary-card.prazo-urgente strong {
+  color: #b42318;
+}
+
+.summary-card.receber {
+  border-color: #f0c7c2;
+  background: #fdf1ef;
+}
+
+.summary-card.roxo {
+  border-color: #cfc0ea;
+  background: #f2ecfb;
+}
+
+.summary-card.amarelo {
+  border-color: #e8d795;
+  background: #fbf5dc;
+}
+
+.summary-card.azul {
+  border-color: #b8d4ea;
+  background: #eaf3fb;
+}
+
+.summary-card.vermelho-medio {
+  border-color: #e39b93;
+  background: #f8d9d5;
+}
+
+.member-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
 }
 
 .badge {

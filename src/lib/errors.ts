@@ -39,3 +39,12 @@ export function translateAuthErr(msg: string) {
   }
   return msg
 }
+
+/** Falha típica de aparelho sem internet (não é erro de login/PIN). */
+export function isNetworkError(err: unknown) {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return true
+  const msg = formatErr(err, '')
+  return /rede|internet|Sem resposta|Tempo esgotado|network|fetch|Failed to fetch|conex|offline|ERR_INTERNET|timed out/i.test(
+    msg,
+  )
+}

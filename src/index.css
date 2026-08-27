@@ -1649,6 +1649,15 @@ button.block-card {
   background: var(--danger);
 }
 
+.contingency-flag {
+  display: inline;
+  margin-left: 0.35rem;
+  color: #b42318;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  font-size: 0.82rem;
+}
+
 @keyframes sync-pulse {
   0%,
   100% {
@@ -1727,7 +1736,7 @@ button.block-card {
   top: 0;
   z-index: 90;
   padding: 0.55rem 0.75rem;
-  animation: banner-blink 1.25s ease-in-out infinite;
+  background: #b42318;
 }
 
 .cloud-contingency-inner {

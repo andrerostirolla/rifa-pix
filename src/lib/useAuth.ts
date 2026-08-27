@@ -13,7 +13,13 @@ export function useAuth() {
       return
     }
     let mounted = true
-    supabase.auth.getSession().then(({ data }) => {
+    const AUTH_WAIT_MS = 4_000
+    Promise.race([
+      supabase.auth.getSession(),
+      new Promise<{ data: { session: Session | null } }>((resolve) =>
+        window.setTimeout(() => resolve({ data: { session: null } }), AUTH_WAIT_MS),
+      ),
+    ]).then(({ data }) => {
       if (!mounted) return
       setSession(data.session)
       setLoading(false)

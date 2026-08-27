@@ -29,15 +29,20 @@ export default function App() {
 
   if (isSupabaseConfigured) {
     if (auth.loading) {
-      return (
-        <div className="auth-shell">
-          <AppUpdateBanner />
-          <div className="auth-card panel">
-            <p className="brand">RifaPIX</p>
-            <p className="hint">Carregando…</p>
+      const existing = loadCloudSession()
+      const memberOffline =
+        existing?.role === 'member' && isAuthenticated() && (typeof navigator === 'undefined' || !navigator.onLine)
+      if (!memberOffline) {
+        return (
+          <div className="auth-shell">
+            <AppUpdateBanner />
+            <div className="auth-card panel">
+              <p className="brand">RifaPIX</p>
+              <p className="hint">Carregando…</p>
+            </div>
           </div>
-        </div>
-      )
+        )
+      }
     }
 
     if (LEGACY_CLOUD && auth.user) return <CloudApp />

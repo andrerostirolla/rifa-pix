@@ -99,6 +99,12 @@ export async function verifyAdminPassword(password: string) {
   if (hash !== record.hash) throw new Error('Senha incorreta.')
 }
 
+function writeSession(session: SessionRecord) {
+  const raw = JSON.stringify(session)
+  sessionStorage.setItem(SESSION_KEY, raw)
+  localStorage.setItem(SESSION_KEY, raw)
+}
+
 async function createAdminSession(organizerName?: string) {
   const tokenBytes = crypto.getRandomValues(new Uint8Array(24))
   const session: SessionRecord = {
@@ -107,7 +113,7 @@ async function createAdminSession(organizerName?: string) {
     role: 'admin',
     memberName: organizerName,
   }
-  sessionStorage.setItem(SESSION_KEY, JSON.stringify(session))
+  writeSession(session)
 }
 
 /** Sessão ADM sem senha local (modo Supabase). */
@@ -124,7 +130,7 @@ export function loginMemberSession(memberId: string, memberName: string) {
     memberId,
     memberName,
   }
-  sessionStorage.setItem(SESSION_KEY, JSON.stringify(session))
+  writeSession(session)
 }
 
 export function loginMember(memberId: string, memberName: string, pin: string, expectedPin: string) {
@@ -134,10 +140,11 @@ export function loginMember(memberId: string, memberName: string, pin: string, e
 
 export function logout() {
   sessionStorage.removeItem(SESSION_KEY)
+  localStorage.removeItem(SESSION_KEY)
 }
 
 export function getSession(): SessionRecord | null {
-  const raw = sessionStorage.getItem(SESSION_KEY)
+  const raw = sessionStorage.getItem(SESSION_KEY) || localStorage.getItem(SESSION_KEY)
   if (!raw) return null
   try {
     const session = JSON.parse(raw) as SessionRecord
@@ -145,6 +152,7 @@ export function getSession(): SessionRecord | null {
       logout()
       return null
     }
+    sessionStorage.setItem(SESSION_KEY, raw)
     return session
   } catch {
     return null

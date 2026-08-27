@@ -22,16 +22,25 @@ function client() {
 
 export function loadCloudSession(): CloudSession | null {
   try {
-    const raw = sessionStorage.getItem(CLOUD_SESSION_KEY)
-    return raw ? (JSON.parse(raw) as CloudSession) : null
+    const raw = sessionStorage.getItem(CLOUD_SESSION_KEY) || localStorage.getItem(CLOUD_SESSION_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as CloudSession
+    sessionStorage.setItem(CLOUD_SESSION_KEY, raw)
+    return parsed
   } catch {
     return null
   }
 }
 
 export function saveCloudSession(session: CloudSession | null) {
-  if (!session) sessionStorage.removeItem(CLOUD_SESSION_KEY)
-  else sessionStorage.setItem(CLOUD_SESSION_KEY, JSON.stringify(session))
+  if (!session) {
+    sessionStorage.removeItem(CLOUD_SESSION_KEY)
+    localStorage.removeItem(CLOUD_SESSION_KEY)
+  } else {
+    const raw = JSON.stringify(session)
+    sessionStorage.setItem(CLOUD_SESSION_KEY, raw)
+    localStorage.setItem(CLOUD_SESSION_KEY, raw)
+  }
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('rifa-cloud-session', { detail: session }))
   }

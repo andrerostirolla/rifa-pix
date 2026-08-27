@@ -127,9 +127,10 @@ function liveAuditSituacao(entry: AuditEntry, sales: Sale[], pixCharges: PixChar
     if (isPixChargeExpired(charge)) return 'PIX cancelado por tempo (expirou)'
     return 'Aguardando pagamento'
   }
-  if (sale.cashSettledAt) return 'Dinheiro prestado (conta da loja)'
-  if ((sale.cashDestination || 'vendedor') === 'loja') return 'Dinheiro entregue na loja'
-  return 'Dinheiro com o membro'
+  // Dinheiro entra quitado: o comprador já pagou, só falta prestar contas
+  if (sale.cashSettledAt) return 'Quitado — dinheiro prestado (conta da loja)'
+  if ((sale.cashDestination || 'vendedor') === 'loja') return 'Quitado — dinheiro entregue na loja'
+  return 'Quitado — dinheiro com o vendedor'
 }
 
 function askProceed(message = 'Tem certeza que deseja prosseguir com essa operação?') {
@@ -852,8 +853,8 @@ export default function LocalApp() {
         'Forma de pagamento': memberCash ? 'Dinheiro' : 'PIX',
         Situação: memberCash
           ? resolvedCashDest === 'loja'
-            ? 'Dinheiro entregue na loja'
-            : 'Dinheiro com o membro'
+            ? 'Quitado — dinheiro entregue na loja'
+            : 'Quitado — dinheiro com o vendedor'
           : 'PIX efetivado',
         Comprador: buyerName,
         Números: formatNumbers(selectedNumbers),
@@ -1545,6 +1546,9 @@ export default function LocalApp() {
                   </label>
                   <label className="full">
                     Forma de recebimento
+                    {offlineContingency ? (
+                      <span className="contingency-flag"> EM CONTINGÊNCIA — SEM REDE</span>
+                    ) : null}
                     <select
                       value={paymentMethod}
                       onChange={(e) => setPaymentMethod(e.target.value as PaymentMethod)}
@@ -1557,12 +1561,6 @@ export default function LocalApp() {
                       </option>
                     </select>
                   </label>
-                  {offlineContingency && (
-                    <p className="hint full payment-rule contingency-hint">
-                      Contingência: só dinheiro. O número fica vendido neste celular e sobe pra nuvem quando a rede
-                      voltar. PIX liberado de novo com “Nuvem ok”.
-                    </p>
-                  )}
                   {!isAdmin && !offlineContingency && paymentMethod === 'dinheiro' && (
                     <p className="hint full payment-rule">
                       O dinheiro fica com você. Depois você presta contas à entidade nos relatórios do ADM.

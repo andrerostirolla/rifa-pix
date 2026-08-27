@@ -21,12 +21,13 @@ import {
 import {
   emptyishState,
   ensureOwnerWorkspace,
+  loadCloudSession,
   openAsMember,
   peekMembers,
   saveCloudSession,
   saveOwnerWorkspaceState,
 } from './lib/workspace'
-import { formatErr, translateAuthErr } from './lib/errors'
+import { formatErr, isNetworkError, translateAuthErr } from './lib/errors'
 import { InstallAppButton } from './InstallAppButton'
 import { useStore } from './store'
 
@@ -172,6 +173,17 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
         setError(null)
       } catch (err) {
         if (!alive) return
+        const local = useStore
+          .getState()
+          .members.filter((m) => m.active)
+          .map((m) => ({ id: m.id, name: m.name }))
+        if (local.length && isNetworkError(err)) {
+          setCloudMembers(local)
+          setNeedTeamLink(false)
+          setError(null)
+          setInfo('Sem rede — entrada em contingência com os dados deste aparelho.')
+          return
+        }
         localStorage.removeItem(WORKSPACE_CODE_KEY)
         setWorkspaceCode('')
         setNeedTeamLink(true)
@@ -188,18 +200,39 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
   }, [isSupabaseConfigured, cloudRole, workspaceCode, cloudMembers.length])
 
   const finishMemberLogin = async (code: string, selectedId: string, usedPin: string, memberName: string) => {
-    const opened = await openAsMember(code, selectedId, usedPin)
-    importSnapshot(opened.state)
-    saveCloudSession({
-      role: 'member',
-      workspace: opened.meta,
-      memberId: opened.memberId,
-      memberName: opened.memberName || memberName,
-    })
-    loginMemberSession(opened.memberId, opened.memberName || memberName)
+    try {
+      const opened = await openAsMember(code, selectedId, usedPin)
+      importSnapshot(opened.state)
+      saveCloudSession({
+        role: 'member',
+        workspace: opened.meta,
+        memberId: opened.memberId,
+        memberName: opened.memberName || memberName,
+      })
+      loginMemberSession(opened.memberId, opened.memberName || memberName)
+    } catch (err) {
+      if (!isNetworkError(err)) throw err
+      const local = useStore.getState().members.find((m) => m.id === selectedId && m.active)
+      if (!local) throw new Error('Sem rede e este aparelho ainda não tem os dados da equipe. Entre uma vez com internet.')
+      if (local.pin.trim() !== usedPin.trim()) throw new Error('PIN incorreto.')
+      const last = loadCloudSession()
+      saveCloudSession({
+        role: 'member',
+        workspace: {
+          id: last?.workspace.id || '',
+          name: last?.workspace.name || 'RifaPIX',
+          accessCode: code.trim().toUpperCase(),
+          updatedAt: last?.workspace.updatedAt || new Date(0).toISOString(),
+        },
+        memberId: local.id,
+        memberName: local.name,
+      })
+      loginMemberSession(local.id, local.name)
+      setInfo('Entrou em contingência (sem rede). As vendas em dinheiro sobem quando a internet voltar.')
+    }
     const payload: RememberedMember = {
-      memberId: opened.memberId,
-      memberName: opened.memberName || memberName,
+      memberId: selectedId,
+      memberName: selectedMemberName || memberName,
       rememberPin: rememberPin || saveInKeychain,
       pin: rememberPin || saveInKeychain ? usedPin : undefined,
     }
@@ -210,8 +243,8 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
       try {
         await registerMemberBiometrics({
           workspaceCode: code,
-          memberId: opened.memberId,
-          memberName: opened.memberName || memberName,
+          memberId: selectedId,
+          memberName: memberName,
           pin: usedPin,
         })
         setInfo('Face ID / biometria ativados neste aparelho.')
@@ -315,8 +348,18 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
           }
           let list = cloudMembers
           if (!list.length) {
-            const peek = await loadCloudMemberList(code)
-            list = peek.members
+            try {
+              const peek = await loadCloudMemberList(code)
+              list = peek.members
+            } catch (err) {
+              const local = useStore
+                .getState()
+                .members.filter((m) => m.active)
+                .map((m) => ({ id: m.id, name: m.name }))
+              if (!local.length || !isNetworkError(err)) throw err
+              list = local
+              setCloudMembers(local)
+            }
           }
           const selectedId = memberId || String(fd.get('memberId') || '')
           const usedPin = pin || String(fd.get('password') || fd.get('pin') || '')

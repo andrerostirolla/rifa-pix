@@ -18,7 +18,7 @@ import {
   type CloudSession,
 } from './lib/workspace'
 import { offloadEmbeddedProofs } from './lib/proofs'
-import { formatErr, translateAuthErr } from './lib/errors'
+import { formatErr, isNetworkError, translateAuthErr } from './lib/errors'
 import { useStore } from './store'
 import type { AppState } from './types'
 
@@ -33,6 +33,25 @@ type SyncStatus = 'sincronizado' | 'salvando' | 'baixando' | 'offline'
 
 const PUSH_DEBOUNCE_MS = 200
 const PULL_INTERVAL_MS = 1200
+/** Em contingência (sem rede): tenta de novo a cada 30s, sem piscar a tela. */
+const CONTINGENCY_RETRY_MS = 30_000
+/** App em segundo plano: testa a rede a cada 1 min e sincroniza sozinho. */
+const BACKGROUND_RETRY_MS = 60_000
+/** Sem resposta da nuvem: derruba a chamada para o app não ficar preso em "salvando". */
+const NET_TIMEOUT_MS = 15_000
+/** Folga de relógio entre aparelhos ao decidir o que ainda não subiu. */
+const CLOCK_SKEW_MS = 5_000
+/** Tempo máximo que um cadeado de sync pode ficar preso antes de ser liberado à força. */
+const LOCK_MAX_MS = 50_000
+
+function withTimeout<T>(promise: Promise<T>, what: string, ms = NET_TIMEOUT_MS): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      window.setTimeout(() => reject(new Error(`Sem resposta da nuvem ao ${what}.`)), ms),
+    ),
+  ])
+}
 
 function snapshotFromStore(): AppState {
   const s = useStore.getState()
@@ -79,6 +98,40 @@ function mergeContingencyState(remote: AppState, local: AppState): AppState {
   }
 }
 
+/**
+ * Vendas feitas neste aparelho depois do último sync (contingência) não podem ser
+ * apagadas por um pull: elas ainda não existem na nuvem e seriam perdidas.
+ */
+function carryUnsyncedLocal(
+  remote: AppState,
+  local: AppState,
+  syncedAtIso: string,
+): { state: AppState; carried: number } {
+  const cut = syncedAtIso ? new Date(syncedAtIso).getTime() - CLOCK_SKEW_MS : NaN
+  if (!Number.isFinite(cut)) return { state: remote, carried: 0 }
+
+  const remoteSales = new Set((remote.sales || []).map((s) => s.id))
+  const pending = (local.sales || []).filter(
+    (s) => !remoteSales.has(s.id) && new Date(s.createdAt).getTime() > cut,
+  )
+  if (!pending.length) return { state: remote, carried: 0 }
+
+  const pendingSaleIds = new Set(pending.map((s) => s.id))
+  const remoteCharges = new Set((remote.pixCharges || []).map((c) => c.id))
+  const charges = (local.pixCharges || []).filter(
+    (c) => !remoteCharges.has(c.id) && c.saleId && pendingSaleIds.has(c.saleId),
+  )
+
+  return {
+    state: {
+      ...remote,
+      sales: [...(remote.sales || []), ...pending],
+      pixCharges: [...(remote.pixCharges || []), ...charges],
+    },
+    carried: pending.length,
+  }
+}
+
 function syncChannelName(accessCode: string) {
   return `rifa-sync-${accessCode.trim().toUpperCase()}`
 }
@@ -91,17 +144,28 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
   const sessionRef = useRef<CloudSession | null>(loadCloudSession())
   const updatedAtRef = useRef(sessionRef.current?.workspace.updatedAt || '')
   const savingRef = useRef(false)
+  const savingSinceRef = useRef(0)
   const pullingRef = useRef(false)
+  const pullingSinceRef = useRef(0)
   const applyingRemoteRef = useRef(false)
   const dirtyRef = useRef(false)
   const pushTimerRef = useRef<number | null>(null)
   const skipPullUntilRef = useRef(0)
   const channelRef = useRef<ReturnType<NonNullable<typeof supabase>['channel']> | null>(null)
+  const syncStatusRef = useRef<SyncStatus>('baixando')
+  const quietRetryRef = useRef(false)
+
+  const setStatus = (next: SyncStatus) => {
+    syncStatusRef.current = next
+    setSyncStatus(next)
+  }
 
   const applyRemote = (state: AppState, updatedAt: string, meta?: Partial<CloudSession['workspace']>) => {
+    const { state: merged, carried } = carryUnsyncedLocal(state, snapshotFromStore(), updatedAtRef.current)
     applyingRemoteRef.current = true
-    dirtyRef.current = false
-    useStore.getState().importSnapshot(state)
+    // Se sobrou venda de contingência para subir, o aparelho continua "sujo"
+    dirtyRef.current = carried > 0
+    useStore.getState().importSnapshot(merged)
     updatedAtRef.current = updatedAt
     const session = sessionRef.current
     if (session) {
@@ -111,6 +175,7 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
     }
     window.setTimeout(() => {
       applyingRemoteRef.current = false
+      if (carried > 0) void pushNow()
     }, 400)
   }
 
@@ -153,15 +218,20 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
     const session = sessionRef.current || loadCloudSession()
     if (!session || savingRef.current || applyingRemoteRef.current) return
     savingRef.current = true
+    savingSinceRef.current = Date.now()
     dirtyRef.current = false
-    setSyncStatus('salvando')
+    if (!quietRetryRef.current) setStatus('salvando')
     try {
       let { state } = await migrateProofsIfNeeded(snapshotFromStore())
       let updatedAt: string
       try {
+        // withTimeout: sem rede o fetch pode ficar pendurado e travar o sync inteiro
         if (session.role === 'admin') {
           if (!session.workspace.id) throw new Error('Workspace sem id')
-          const opened = await fetchOwnerWorkspace(session.workspace.id, session.workspace.accessCode)
+          const opened = await withTimeout(
+            fetchOwnerWorkspace(session.workspace.id, session.workspace.accessCode),
+            'ler o workspace',
+          )
           if (isNewer(opened.meta.updatedAt, updatedAtRef.current)) {
             state = mergeContingencyState(opened.state, state)
             applyingRemoteRef.current = true
@@ -170,18 +240,26 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
               applyingRemoteRef.current = false
             }, 0)
           }
-          updatedAt = await saveOwnerWorkspaceState(session.workspace.id, state, session.workspace.accessCode)
+          updatedAt = await withTimeout(
+            saveOwnerWorkspaceState(session.workspace.id, state, session.workspace.accessCode),
+            'salvar',
+          )
         } else {
-          updatedAt = await saveByAccessCode(session.workspace.accessCode, state, updatedAtRef.current)
+          updatedAt = await withTimeout(
+            saveByAccessCode(session.workspace.accessCode, state, updatedAtRef.current),
+            'salvar',
+          )
         }
       } catch (firstErr) {
         const msg = firstErr instanceof Error ? firstErr.message : String(firstErr)
         if (!/desatualiz|conflict|updated/i.test(msg)) throw firstErr
         // Nuvem mudou enquanto estava offline: mescla vendas locais e sobe de novo
-        const opened =
+        const opened = await withTimeout(
           session.role === 'admin' && session.workspace.id
-            ? await fetchOwnerWorkspace(session.workspace.id, session.workspace.accessCode)
-            : await fetchByAccessCode(session.workspace.accessCode)
+            ? fetchOwnerWorkspace(session.workspace.id, session.workspace.accessCode)
+            : fetchByAccessCode(session.workspace.accessCode),
+          'ler o workspace',
+        )
         state = mergeContingencyState(opened.state, snapshotFromStore())
         applyingRemoteRef.current = true
         useStore.getState().importSnapshot(state)
@@ -189,9 +267,15 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
           applyingRemoteRef.current = false
         }, 0)
         if (session.role === 'admin' && session.workspace.id) {
-          updatedAt = await saveOwnerWorkspaceState(session.workspace.id, state, session.workspace.accessCode)
+          updatedAt = await withTimeout(
+            saveOwnerWorkspaceState(session.workspace.id, state, session.workspace.accessCode),
+            'salvar',
+          )
         } else {
-          updatedAt = await saveByAccessCode(session.workspace.accessCode, state, opened.meta.updatedAt)
+          updatedAt = await withTimeout(
+            saveByAccessCode(session.workspace.accessCode, state, opened.meta.updatedAt),
+            'salvar',
+          )
         }
       }
       updatedAtRef.current = updatedAt
@@ -199,7 +283,7 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
       saveCloudSession(session)
       sessionRef.current = session
       skipPullUntilRef.current = Date.now() + 350
-      setSyncStatus('sincronizado')
+      setStatus('sincronizado')
       setSyncError(null)
       void broadcastUpdated(updatedAt)
     } catch (err) {
@@ -215,11 +299,12 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
           console.warn('Recuperação por pull após falha ao salvar (ADM)', pullErr)
         }
       }
-      setSyncStatus('offline')
+      setStatus('offline')
       setSyncError(msg)
       dirtyRef.current = true
     } finally {
       savingRef.current = false
+      savingSinceRef.current = 0
     }
   }
 
@@ -233,7 +318,10 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
     if (dirtyRef.current) {
       if (session.role === 'admin') {
         try {
-          const remoteTs = await peekWorkspaceUpdatedAt(session.workspace.accessCode)
+          const remoteTs = await withTimeout(
+            peekWorkspaceUpdatedAt(session.workspace.accessCode),
+            'consultar a nuvem',
+          )
           if (isNewer(remoteTs, updatedAtRef.current)) {
             dirtyRef.current = false
           } else {
@@ -254,43 +342,80 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
     }
 
     pullingRef.current = true
+    pullingSinceRef.current = Date.now()
     try {
       // checagem barata primeiro (se RPC existir); senão cai no fetch completo
       try {
-        const remoteTs = await peekWorkspaceUpdatedAt(session.workspace.accessCode)
+        const remoteTs = await withTimeout(
+          peekWorkspaceUpdatedAt(session.workspace.accessCode),
+          'consultar a nuvem',
+        )
         if (!force && !isNewer(remoteTs, updatedAtRef.current)) {
-          setSyncStatus('sincronizado')
+          setStatus('sincronizado')
+          setSyncError(null)
           return
         }
-      } catch {
-        /* RPC ainda não aplicada — segue com fetch completo */
+      } catch (peekErr) {
+        if (!navigator.onLine || quietRetryRef.current) throw peekErr
       }
 
-      const opened =
+      if (!quietRetryRef.current) setStatus('baixando')
+      const opened = await withTimeout(
         session.role === 'admin' && session.workspace.id
-          ? await fetchOwnerWorkspace(session.workspace.id, session.workspace.accessCode)
-          : await fetchByAccessCode(session.workspace.accessCode)
+          ? fetchOwnerWorkspace(session.workspace.id, session.workspace.accessCode)
+          : fetchByAccessCode(session.workspace.accessCode),
+        'baixar',
+      )
       if (force || isNewer(opened.meta.updatedAt, updatedAtRef.current)) {
-        setSyncStatus('baixando')
+        if (!quietRetryRef.current) setStatus('baixando')
         applyRemote(opened.state, opened.meta.updatedAt, opened.meta)
-        setSyncStatus('sincronizado')
+        setStatus('sincronizado')
         setSyncError(null)
       } else {
-        setSyncStatus('sincronizado')
+        setStatus('sincronizado')
         setSyncError(null)
       }
     } catch (err) {
       const msg = formatErr(err, 'Falha ao baixar')
       console.warn('Falha ao puxar da nuvem', err)
       setSyncError(msg)
-      // Já tem workspace em memória: não dispara contingência por um pull falho
-      if (updatedAtRef.current) {
-        setSyncStatus('sincronizado')
+      // Já tem workspace em memória e a rede está de pé: não dispara contingência por um pull falho
+      if (updatedAtRef.current && navigator.onLine && !quietRetryRef.current) {
+        setStatus('sincronizado')
       } else {
-        setSyncStatus('offline')
+        setStatus('offline')
       }
     } finally {
       pullingRef.current = false
+      pullingSinceRef.current = 0
+    }
+  }
+
+  /** Se uma chamada morreu pendurada, o cadeado ficaria preso e nada mais sincronizaria. */
+  const clearStuckLocks = () => {
+    const now = Date.now()
+    if (savingRef.current && savingSinceRef.current && now - savingSinceRef.current > LOCK_MAX_MS) {
+      console.warn('Sync preso ao salvar — liberando para tentar de novo')
+      savingRef.current = false
+      savingSinceRef.current = 0
+      dirtyRef.current = true
+    }
+    if (pullingRef.current && pullingSinceRef.current && now - pullingSinceRef.current > LOCK_MAX_MS) {
+      console.warn('Sync preso ao baixar — liberando para tentar de novo')
+      pullingRef.current = false
+      pullingSinceRef.current = 0
+    }
+  }
+
+  /** Rede de volta (ou app em foco): sobe o pendente e baixa, sem recarregar a página. */
+  const reconnectNow = async (quiet = false) => {
+    quietRetryRef.current = quiet
+    clearStuckLocks()
+    try {
+      if (dirtyRef.current) await pushNow()
+      await pullNow(true)
+    } finally {
+      quietRetryRef.current = false
     }
   }
 
@@ -309,16 +434,33 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
           return
         }
 
+        const enterMemberOffline = (reason: string) => {
+          if (!session || session.role !== 'member') return false
+          loginMemberSession(session.memberId, session.memberName)
+          dirtyRef.current = true
+          setBoot(false)
+          setStatus('offline')
+          setSyncError(reason)
+          onReady()
+          return true
+        }
+
+        if (mode === 'member' && session.role === 'member' && !navigator.onLine) {
+          enterMemberOffline('Sem internet neste aparelho.')
+          return
+        }
+
         const bootWork = async () => {
           if (mode === 'admin' && session.role === 'admin') {
             const { meta, state } = await ensureOwnerWorkspace(session.workspace.name)
             const next: CloudSession = { role: 'admin', workspace: meta }
             saveCloudSession(next)
             sessionRef.current = next
-            updatedAtRef.current = meta.updatedAt
             if (!emptyishState(state)) {
+              // updatedAtRef só depois: applyRemote usa o valor antigo para saber o que ainda não subiu
               applyRemote(state!, meta.updatedAt, meta)
             } else {
+              updatedAtRef.current = meta.updatedAt
               const local = snapshotFromStore()
               if (!emptyishState(local)) {
                 const updatedAt = await saveOwnerWorkspaceState(meta.id, local, meta.accessCode)
@@ -382,15 +524,27 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
 
         if (alive) {
           setBoot(false)
-          setSyncStatus('sincronizado')
+          setStatus('sincronizado')
           onReady()
         }
       } catch (err) {
-        if (alive) {
+        if (!alive) return
+        const msg = translateAuthErr(formatErr(err, 'Falha ao abrir workspace'))
+        const session = sessionRef.current
+
+        if (mode === 'member' && session?.role === 'member' && isNetworkError(err)) {
+          loginMemberSession(session.memberId, session.memberName)
+          dirtyRef.current = true
           setBoot(false)
-          setSyncStatus('offline')
-          onError(translateAuthErr(formatErr(err, 'Falha ao abrir workspace')))
+          setStatus('offline')
+          setSyncError(msg)
+          onReady()
+          return
         }
+
+        setBoot(false)
+        setStatus('offline')
+        onError(msg)
       }
     })()
     return () => {
@@ -418,7 +572,8 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
       if (applyingRemoteRef.current) return
       if (mode === 'admin') return
       dirtyRef.current = true
-      setSyncStatus('salvando')
+      if (syncStatusRef.current === 'offline' || !navigator.onLine) return
+      setStatus('salvando')
       if (pushTimerRef.current) window.clearTimeout(pushTimerRef.current)
       pushTimerRef.current = window.setTimeout(() => {
         void pushNow()
@@ -447,28 +602,53 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
     return () => window.removeEventListener('rifa-cloud-session', onSession)
   }, [boot])
 
-  // Pull periódico + foco/visibilidade
+  // Pull periódico: 1,2s online; 30s em contingência; 1 min em segundo plano
   useEffect(() => {
     if (boot) return
-    const id = window.setInterval(() => {
-      void pullNow(false)
-    }, PULL_INTERVAL_MS)
+    let timer = 0
+    const delayNow = () => {
+      if (document.visibilityState !== 'visible') return BACKGROUND_RETRY_MS
+      if (syncStatusRef.current === 'offline' || !navigator.onLine) return CONTINGENCY_RETRY_MS
+      return PULL_INTERVAL_MS
+    }
+    const tick = () => {
+      const offline = syncStatusRef.current === 'offline' || !navigator.onLine
+      const hidden = document.visibilityState !== 'visible'
+      if (offline || hidden) {
+        void reconnectNow(true)
+      } else {
+        void pullNow(false)
+      }
+      timer = window.setTimeout(tick, delayNow())
+    }
+    timer = window.setTimeout(tick, delayNow())
     const onFocus = () => {
-      void pullNow(true)
+      void reconnectNow(syncStatusRef.current === 'offline')
     }
     const onOnline = () => {
-      void pullNow(true)
+      window.clearTimeout(timer)
+      timer = window.setTimeout(tick, 400)
+    }
+    const onOffline = () => {
+      setStatus('offline')
+      setSyncError('Sem internet neste aparelho.')
+      window.clearTimeout(timer)
+      timer = window.setTimeout(tick, CONTINGENCY_RETRY_MS)
     }
     const onVisibility = () => {
-      if (document.visibilityState === 'visible') void pullNow(true)
+      if (document.visibilityState === 'visible') {
+        void reconnectNow(syncStatusRef.current === 'offline')
+      }
     }
     window.addEventListener('focus', onFocus)
     window.addEventListener('online', onOnline)
+    window.addEventListener('offline', onOffline)
     document.addEventListener('visibilitychange', onVisibility)
     return () => {
-      window.clearInterval(id)
+      window.clearTimeout(timer)
       window.removeEventListener('focus', onFocus)
       window.removeEventListener('online', onOnline)
+      window.removeEventListener('offline', onOffline)
       document.removeEventListener('visibilitychange', onVisibility)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -523,13 +703,13 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
           if (!isNewer(row.updated_at, updatedAtRef.current)) return
           if (savingRef.current) return
           dirtyRef.current = false
-          setSyncStatus('baixando')
+          setStatus('baixando')
           applyRemote(row.state, row.updated_at, {
             updatedAt: row.updated_at,
             accessCode: row.access_code || session.workspace.accessCode,
             name: row.name || session.workspace.name,
           })
-          setSyncStatus('sincronizado')
+          setStatus('sincronizado')
         },
       )
     }
@@ -561,7 +741,7 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
       : syncStatus === 'baixando'
         ? 'Atualizando…'
         : syncStatus === 'offline'
-          ? 'Sem nuvem'
+          ? 'Contingência'
           : 'Nuvem ok'
 
   return (
@@ -571,6 +751,10 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
         error: syncError,
         cloudOk: syncStatus !== 'offline',
         mode,
+        retry: () => {
+          setSyncError(null)
+          void reconnectNow(false)
+        },
       }}
     >
       <AppUpdateBanner />

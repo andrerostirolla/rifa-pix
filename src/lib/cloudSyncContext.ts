@@ -8,6 +8,8 @@ export type CloudSyncContextValue = {
   /** true só quando a última comunicação com a nuvem foi ok */
   cloudOk: boolean
   mode: 'admin' | 'member'
+  /** Tenta de novo agora, sem recarregar a página (recarregar apagaria venda offline). */
+  retry: () => void
 }
 
 export const CloudSyncContext = createContext<CloudSyncContextValue>({
@@ -15,6 +17,7 @@ export const CloudSyncContext = createContext<CloudSyncContextValue>({
   error: null,
   cloudOk: false,
   mode: 'member',
+  retry: () => {},
 })
 
 export function useCloudSync() {

@@ -382,9 +382,85 @@ tbody tr.sale-cancelled:hover > td {
 
 .summary-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-areas:
+    'membros vendas vendas vendas vendas'
+    'prazo caixa caixa equipe equipe'
+    'numeros numeros compradores compradores ticket';
   gap: 0.7rem;
   margin: 0.4rem 0 1.4rem;
+  align-items: stretch;
+}
+
+.summary-solo--membros {
+  grid-area: membros;
+}
+
+.summary-group--vendas {
+  grid-area: vendas;
+}
+
+.summary-solo--prazo {
+  grid-area: prazo;
+}
+
+.summary-group--caixa {
+  grid-area: caixa;
+}
+
+.summary-group--equipe {
+  grid-area: equipe;
+}
+
+.summary-group--numeros {
+  grid-area: numeros;
+}
+
+.summary-group--compradores {
+  grid-area: compradores;
+}
+
+.summary-solo--ticket {
+  grid-area: ticket;
+}
+
+.summary-group {
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.4rem;
+  border-radius: 14px;
+  border: 1px solid transparent;
+  min-width: 0;
+}
+
+.summary-group--vendas {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  background: rgba(221, 140, 174, 0.2);
+  border-color: rgba(196, 108, 145, 0.35);
+}
+
+.summary-group--caixa {
+  grid-template-columns: 1fr 1fr;
+  background: rgba(183, 110, 0, 0.12);
+  border-color: rgba(183, 110, 0, 0.22);
+}
+
+.summary-group--equipe {
+  grid-template-columns: 1fr 1fr;
+  background: rgba(124, 92, 176, 0.12);
+  border-color: rgba(124, 92, 176, 0.22);
+}
+
+.summary-group--numeros {
+  grid-template-columns: 1fr 1fr;
+  background: rgba(47, 110, 170, 0.12);
+  border-color: rgba(47, 110, 170, 0.22);
+}
+
+.summary-group--compradores {
+  grid-template-columns: 1fr 1fr;
+  background: rgba(15, 122, 95, 0.1);
+  border-color: rgba(15, 122, 95, 0.2);
 }
 
 .summary-card {
@@ -490,6 +566,16 @@ tbody tr.sale-cancelled:hover > td {
 .summary-card.vermelho-medio {
   border-color: #e39b93;
   background: #f8d9d5;
+}
+
+.summary-card.teal-1 {
+  border-color: #9ecfc0;
+  background: #e7f6f0;
+}
+
+.summary-card.teal-2 {
+  border-color: #7dbeab;
+  background: #d5efe6;
 }
 
 .cancel-tally {
@@ -1076,6 +1162,51 @@ button.block-card {
   margin-top: 0.35rem;
 }
 
+.report-metrics.hero-metrics {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.metric-group {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  border-radius: 20px;
+  border: 1px solid transparent;
+  min-width: 0;
+}
+
+.metric-group .metric {
+  background: rgba(255, 255, 255, 0.88);
+  box-shadow: none;
+}
+
+.metric-group--estoque {
+  background: rgba(15, 122, 95, 0.12);
+  border-color: rgba(15, 122, 95, 0.22);
+}
+
+.metric-group--caixa {
+  background: rgba(183, 110, 0, 0.13);
+  border-color: rgba(183, 110, 0, 0.24);
+}
+
+.metric-group--meio {
+  background: rgba(47, 110, 170, 0.12);
+  border-color: rgba(47, 110, 170, 0.22);
+}
+
+.metric-group--canal {
+  background: rgba(124, 92, 176, 0.12);
+  border-color: rgba(124, 92, 176, 0.22);
+}
+
+.metric-group--cancela {
+  background: rgba(180, 35, 24, 0.1);
+  border-color: rgba(180, 35, 24, 0.2);
+}
+
 .report-filters {
   margin: 0.5rem 0 0.75rem;
 }
@@ -1398,6 +1529,22 @@ button.block-card {
   .report-metrics.hero-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .summary-grid {
+    grid-template-columns: 1fr 1fr;
+    grid-template-areas:
+      'membros prazo'
+      'vendas vendas'
+      'caixa caixa'
+      'equipe equipe'
+      'numeros numeros'
+      'compradores compradores'
+      'ticket ticket';
+  }
+
+  .summary-group--vendas {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 900px) {
@@ -1472,10 +1619,27 @@ button.block-card {
     font-size: 0.88rem;
   }
 
-  .hero-metrics,
-  .report-metrics.hero-metrics {
+  .hero-metrics {
     grid-template-columns: 1fr 1fr;
     gap: 0.55rem;
+  }
+
+  .report-metrics.hero-metrics {
+    grid-template-columns: 1fr;
+    gap: 0.55rem;
+  }
+
+  .summary-grid {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      'membros'
+      'vendas'
+      'prazo'
+      'caixa'
+      'equipe'
+      'numeros'
+      'compradores'
+      'ticket';
   }
 
   .metric {
@@ -1575,6 +1739,15 @@ button.block-card {
 @media (max-width: 380px) {
   .hero-metrics,
   .report-metrics.hero-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .metric-group,
+  .summary-group--caixa,
+  .summary-group--equipe,
+  .summary-group--numeros,
+  .summary-group--compradores,
+  .summary-group--vendas {
     grid-template-columns: 1fr;
   }
 

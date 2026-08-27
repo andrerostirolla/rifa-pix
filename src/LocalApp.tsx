@@ -1867,33 +1867,35 @@ export default function LocalApp() {
           ) : null}
           <h3>Resumo</h3>
           <div className="summary-grid">
-            <article className="summary-card">
+            <article className="summary-card summary-solo summary-solo--membros">
               <span>Membros cadastrados</span>
               <strong>{members.length}</strong>
               <em>{resumo.maisVendeu ? `${resumo.maisVendeu.name} lidera as vendas` : 'sem vendas ainda'}</em>
             </article>
-            <article className="summary-card pink-1">
-              <span>Vendas hoje</span>
-              <strong>{resumo.hoje.qtd}</strong>
-              <em>{brl(resumo.hoje.valor)}</em>
-            </article>
-            <article className="summary-card pink-2">
-              <span>Vendas na semana</span>
-              <strong>{resumo.semana.qtd}</strong>
-              <em>{brl(resumo.semana.valor)} · últimos 7 dias</em>
-            </article>
-            <article className="summary-card pink-3">
-              <span>Vendas no mês</span>
-              <strong>{resumo.mes.qtd}</strong>
-              <em>{brl(resumo.mes.valor)}</em>
-            </article>
-            <article className="summary-card pink-4">
-              <span>Vendas no total</span>
-              <strong>{resumo.total.qtd}</strong>
-              <em>{brl(resumo.total.valor)}</em>
-            </article>
+            <div className="summary-group summary-group--vendas">
+              <article className="summary-card pink-1">
+                <span>Vendas hoje</span>
+                <strong>{resumo.hoje.qtd}</strong>
+                <em>{brl(resumo.hoje.valor)}</em>
+              </article>
+              <article className="summary-card pink-2">
+                <span>Vendas na semana</span>
+                <strong>{resumo.semana.qtd}</strong>
+                <em>{brl(resumo.semana.valor)} · últimos 7 dias</em>
+              </article>
+              <article className="summary-card pink-3">
+                <span>Vendas no mês</span>
+                <strong>{resumo.mes.qtd}</strong>
+                <em>{brl(resumo.mes.valor)}</em>
+              </article>
+              <article className="summary-card pink-4">
+                <span>Vendas no total</span>
+                <strong>{resumo.total.qtd}</strong>
+                <em>{brl(resumo.total.valor)}</em>
+              </article>
+            </div>
             <article
-              className={`summary-card ${
+              className={`summary-card summary-solo summary-solo--prazo ${
                 resumo.diasSorteio == null
                   ? ''
                   : resumo.diasSorteio <= 30
@@ -1911,73 +1913,81 @@ export default function LocalApp() {
                   : 'sem data de sorteio'}
               </em>
             </article>
-            <article className="summary-card ok">
-              <span>Valores em conta</span>
-              <strong>
-                {brl(resumo.emConta)} <small>{pct(resumo.emConta, resumo.total.valor)}</small>
-              </strong>
-              <em>do vendido · PIX da loja + dinheiro já prestado</em>
-            </article>
-            <article className="summary-card receber">
-              <span>Valores a receber</span>
-              <strong>
-                {brl(resumo.aReceber)} <small>{pct(resumo.aReceber, resumo.total.valor)}</small>
-              </strong>
-              <em>
-                {brl(resumo.comVendedores)} com vendedores · {brl(resumo.pixAberto)} PIX em aberto
-              </em>
-            </article>
-            <article className="summary-card roxo">
-              <span>Membro que mais vendeu</span>
-              <strong>{resumo.maisVendeu?.name || '—'}</strong>
-              <em>
-                {resumo.maisVendeu
-                  ? `${resumo.maisVendeu.vendidos} nº vendidos · faltam ${resumo.maisVendeu.restam} nº`
-                  : 'sem vendas'}
-              </em>
-            </article>
-            <article className="summary-card amarelo">
-              <span>Membro que menos vendeu</span>
-              <strong>{resumo.menosVendeu?.name || '—'}</strong>
-              <em>
-                {resumo.menosVendeu
-                  ? `${resumo.menosVendeu.vendidos} nº vendidos · faltam ${resumo.menosVendeu.restam} nº`
-                  : 'precisa de 2+ membros'}
-              </em>
-            </article>
-            <article className="summary-card azul">
-              <span>Números vendidos</span>
-              <strong>
-                {resumo.vendidosQtd} <small>{pct(resumo.vendidosQtd, resumo.totalNumeros)}</small>
-              </strong>
-              <em>{brl(resumo.vendidosValor)} do total de {resumo.totalNumeros} nº</em>
-            </article>
-            <article className="summary-card vermelho-medio">
-              <span>Números a vender</span>
-              <strong>
-                {resumo.restanteQtd} <small>{pct(resumo.restanteQtd, resumo.totalNumeros)}</small>
-              </strong>
-              <em>{brl(resumo.restanteValor)} a arrecadar</em>
-            </article>
-            <article className="summary-card">
-              <span>Maior comprador</span>
-              <strong>{resumo.maiorComprador?.name || '—'}</strong>
-              <em>
-                {resumo.maiorComprador
-                  ? `${resumo.maiorComprador.numeros} nº · ${brl(resumo.maiorComprador.valor)}`
-                  : 'sem compradores'}
-              </em>
-            </article>
-            <article className="summary-card">
-              <span>Menor comprador</span>
-              <strong>{resumo.menorComprador?.name || '—'}</strong>
-              <em>
-                {resumo.menorComprador
-                  ? `${resumo.menorComprador.numeros} nº · ${brl(resumo.menorComprador.valor)}`
-                  : 'precisa de 2+ compradores'}
-              </em>
-            </article>
-            <article className="summary-card">
+            <div className="summary-group summary-group--caixa">
+              <article className="summary-card ok">
+                <span>Valores em conta</span>
+                <strong>
+                  {brl(resumo.emConta)} <small>{pct(resumo.emConta, resumo.total.valor)}</small>
+                </strong>
+                <em>do vendido · PIX da loja + dinheiro já prestado</em>
+              </article>
+              <article className="summary-card receber">
+                <span>Valores a receber</span>
+                <strong>
+                  {brl(resumo.aReceber)} <small>{pct(resumo.aReceber, resumo.total.valor)}</small>
+                </strong>
+                <em>
+                  {brl(resumo.comVendedores)} com vendedores · {brl(resumo.pixAberto)} PIX em aberto
+                </em>
+              </article>
+            </div>
+            <div className="summary-group summary-group--equipe">
+              <article className="summary-card roxo">
+                <span>Membro que mais vendeu</span>
+                <strong>{resumo.maisVendeu?.name || '—'}</strong>
+                <em>
+                  {resumo.maisVendeu
+                    ? `${resumo.maisVendeu.vendidos} nº vendidos · faltam ${resumo.maisVendeu.restam} nº`
+                    : 'sem vendas'}
+                </em>
+              </article>
+              <article className="summary-card amarelo">
+                <span>Membro que menos vendeu</span>
+                <strong>{resumo.menosVendeu?.name || '—'}</strong>
+                <em>
+                  {resumo.menosVendeu
+                    ? `${resumo.menosVendeu.vendidos} nº vendidos · faltam ${resumo.menosVendeu.restam} nº`
+                    : 'precisa de 2+ membros'}
+                </em>
+              </article>
+            </div>
+            <div className="summary-group summary-group--numeros">
+              <article className="summary-card azul">
+                <span>Números vendidos</span>
+                <strong>
+                  {resumo.vendidosQtd} <small>{pct(resumo.vendidosQtd, resumo.totalNumeros)}</small>
+                </strong>
+                <em>{brl(resumo.vendidosValor)} do total de {resumo.totalNumeros} nº</em>
+              </article>
+              <article className="summary-card vermelho-medio">
+                <span>Números a vender</span>
+                <strong>
+                  {resumo.restanteQtd} <small>{pct(resumo.restanteQtd, resumo.totalNumeros)}</small>
+                </strong>
+                <em>{brl(resumo.restanteValor)} a arrecadar</em>
+              </article>
+            </div>
+            <div className="summary-group summary-group--compradores">
+              <article className="summary-card teal-1">
+                <span>Maior comprador</span>
+                <strong>{resumo.maiorComprador?.name || '—'}</strong>
+                <em>
+                  {resumo.maiorComprador
+                    ? `${resumo.maiorComprador.numeros} nº · ${brl(resumo.maiorComprador.valor)}`
+                    : 'sem compradores'}
+                </em>
+              </article>
+              <article className="summary-card teal-2">
+                <span>Menor comprador</span>
+                <strong>{resumo.menorComprador?.name || '—'}</strong>
+                <em>
+                  {resumo.menorComprador
+                    ? `${resumo.menorComprador.numeros} nº · ${brl(resumo.menorComprador.valor)}`
+                    : 'precisa de 2+ compradores'}
+                </em>
+              </article>
+            </div>
+            <article className="summary-card summary-solo summary-solo--ticket">
               <span>Ticket médio geral</span>
               <strong>{brl(resumo.ticketMedio)}</strong>
               <em>por venda registrada</em>
@@ -3177,85 +3187,95 @@ export default function LocalApp() {
               </label>
             </div>
             <div className="hero-metrics report-metrics">
-              <article className="metric">
-                <span>Esperado (a vender)</span>
-                <strong>{brl(reportGlobals.esperado)}</strong>
-                <em>
-                  {reportGlobals.aVenderQtd} nº a vender ·{' '}
-                  {pct(reportGlobals.aVenderQtd, reportGlobals.totalNumeros)} de{' '}
-                  {reportGlobals.totalNumeros} nº
-                </em>
-              </article>
-              <article className="metric">
-                <span>Vendido</span>
-                <strong>{brl(reportGlobals.vendidoValor)}</strong>
-                <em>
-                  {reportGlobals.vendidosQtd} nº vendidos ·{' '}
-                  {pct(reportGlobals.vendidosQtd, reportGlobals.totalNumeros)} de{' '}
-                  {reportGlobals.totalNumeros} nº
-                </em>
-              </article>
-              <article className="metric">
-                <span>Recebido</span>
-                <strong>{brl(reportGlobals.recebido)}</strong>
-                <em>PIX na loja + dinheiro já prestado</em>
-              </article>
-              <article className="metric">
-                <span>A receber — a prestar contas</span>
-                <strong>{brl(reportGlobals.aPrestar)}</strong>
-                <em>dinheiro ainda com os vendedores</em>
-              </article>
-              <article className="metric">
-                <span>Recebido em PIX</span>
-                <strong>{brl(reportGlobals.pixRecebido)}</strong>
-                <em>
-                  {reportGlobals.pixNumeros} nº em PIX ·{' '}
-                  {pct(reportGlobals.pixNumeros, reportGlobals.totalNumeros)} de{' '}
-                  {reportGlobals.totalNumeros} nº
-                </em>
-              </article>
-              <article className="metric">
-                <span>Recebido em dinheiro</span>
-                <strong>{brl(reportGlobals.dinheiroRecebido)}</strong>
-                <em>
-                  {reportGlobals.dinheiroNumeros} nº em dinheiro ·{' '}
-                  {pct(reportGlobals.dinheiroNumeros, reportGlobals.totalNumeros)} de{' '}
-                  {reportGlobals.totalNumeros} nº
-                </em>
-              </article>
-              <article className="metric">
-                <span>Números em contingência</span>
-                <strong>{reportGlobals.contingenciaNumeros}</strong>
-                <em>
-                  {reportGlobals.contingenciaNumeros} nº vendidos sem rede ·{' '}
-                  {pct(reportGlobals.contingenciaNumeros, reportGlobals.totalNumeros)} de{' '}
-                  {reportGlobals.totalNumeros} nº
-                </em>
-              </article>
-              <article className="metric">
-                <span>Números vendidos online</span>
-                <strong>{reportGlobals.onlineNumeros}</strong>
-                <em>
-                  {reportGlobals.onlineNumeros} nº com nuvem ·{' '}
-                  {pct(reportGlobals.onlineNumeros, reportGlobals.totalNumeros)} de{' '}
-                  {reportGlobals.totalNumeros} nº
-                </em>
-              </article>
-              <article className="metric">
-                <span>Cancelados por membro</span>
-                <strong>{reportGlobals.cancMembro.qtd}</strong>
-                <em>
-                  {reportGlobals.cancMembro.numeros} nº liberados ·{' '}
-                  {brl(reportGlobals.cancMembro.valor)}
-                </em>
-              </article>
-              <article className="metric">
-                <span>Cancelados por tempo</span>
-                <strong>{reportGlobals.cancTempo.qtd}</strong>
-                <em>
-                  {reportGlobals.cancTempo.numeros} nº liberados · {brl(reportGlobals.cancTempo.valor)}
-                </em>
-              </article>
+              <div className="metric-group metric-group--estoque">
+                <article className="metric">
+                  <span>Esperado (a vender)</span>
+                  <strong>{brl(reportGlobals.esperado)}</strong>
+                  <em>
+                    {reportGlobals.aVenderQtd} nº a vender ·{' '}
+                    {pct(reportGlobals.aVenderQtd, reportGlobals.totalNumeros)} de{' '}
+                    {reportGlobals.totalNumeros} nº
+                  </em>
+                </article>
+                <article className="metric">
+                  <span>Vendido</span>
+                  <strong>{brl(reportGlobals.vendidoValor)}</strong>
+                  <em>
+                    {reportGlobals.vendidosQtd} nº vendidos ·{' '}
+                    {pct(reportGlobals.vendidosQtd, reportGlobals.totalNumeros)} de{' '}
+                    {reportGlobals.totalNumeros} nº
+                  </em>
+                </article>
+              </div>
+              <div className="metric-group metric-group--caixa">
+                <article className="metric">
+                  <span>Recebido</span>
+                  <strong>{brl(reportGlobals.recebido)}</strong>
+                  <em>PIX na loja + dinheiro já prestado</em>
+                </article>
+                <article className="metric">
+                  <span>A receber — a prestar contas</span>
+                  <strong>{brl(reportGlobals.aPrestar)}</strong>
+                  <em>dinheiro ainda com os vendedores</em>
+                </article>
+              </div>
+              <div className="metric-group metric-group--meio">
+                <article className="metric">
+                  <span>Recebido em PIX</span>
+                  <strong>{brl(reportGlobals.pixRecebido)}</strong>
+                  <em>
+                    {reportGlobals.pixNumeros} nº em PIX ·{' '}
+                    {pct(reportGlobals.pixNumeros, reportGlobals.totalNumeros)} de{' '}
+                    {reportGlobals.totalNumeros} nº
+                  </em>
+                </article>
+                <article className="metric">
+                  <span>Recebido em dinheiro</span>
+                  <strong>{brl(reportGlobals.dinheiroRecebido)}</strong>
+                  <em>
+                    {reportGlobals.dinheiroNumeros} nº em dinheiro ·{' '}
+                    {pct(reportGlobals.dinheiroNumeros, reportGlobals.totalNumeros)} de{' '}
+                    {reportGlobals.totalNumeros} nº
+                  </em>
+                </article>
+              </div>
+              <div className="metric-group metric-group--canal">
+                <article className="metric">
+                  <span>Números em contingência</span>
+                  <strong>{reportGlobals.contingenciaNumeros}</strong>
+                  <em>
+                    {reportGlobals.contingenciaNumeros} nº vendidos sem rede ·{' '}
+                    {pct(reportGlobals.contingenciaNumeros, reportGlobals.totalNumeros)} de{' '}
+                    {reportGlobals.totalNumeros} nº
+                  </em>
+                </article>
+                <article className="metric">
+                  <span>Números vendidos online</span>
+                  <strong>{reportGlobals.onlineNumeros}</strong>
+                  <em>
+                    {reportGlobals.onlineNumeros} nº com nuvem ·{' '}
+                    {pct(reportGlobals.onlineNumeros, reportGlobals.totalNumeros)} de{' '}
+                    {reportGlobals.totalNumeros} nº
+                  </em>
+                </article>
+              </div>
+              <div className="metric-group metric-group--cancela">
+                <article className="metric">
+                  <span>Cancelados por membro</span>
+                  <strong>{reportGlobals.cancMembro.qtd}</strong>
+                  <em>
+                    {reportGlobals.cancMembro.numeros} nº liberados ·{' '}
+                    {brl(reportGlobals.cancMembro.valor)}
+                  </em>
+                </article>
+                <article className="metric">
+                  <span>Cancelados por tempo</span>
+                  <strong>{reportGlobals.cancTempo.qtd}</strong>
+                  <em>
+                    {reportGlobals.cancTempo.numeros} nº liberados · {brl(reportGlobals.cancTempo.valor)}
+                  </em>
+                </article>
+              </div>
             </div>
           </div>
 

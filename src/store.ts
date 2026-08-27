@@ -48,12 +48,20 @@ function mergeAudit(remote: AuditEntry[] = [], local: AuditEntry[] = []): AuditE
   return [...byId.values()].sort((a, b) => String(b.at).localeCompare(String(a.at))).slice(0, AUDIT_MAX)
 }
 
+function wasSoldOffline(s?: Sale | null) {
+  return Boolean(s?.soldOffline || /contingenc/i.test(s?.notes || ''))
+}
+
 function pickSale(a: Sale, b: Sale): Sale {
-  if (a.cancelledAt && !b.cancelledAt) return a
-  if (b.cancelledAt && !a.cancelledAt) return b
-  if (Boolean(a.cashSettledAt) !== Boolean(b.cashSettledAt)) return a.cashSettledAt ? a : b
-  if ((a.paidAmount || 0) !== (b.paidAmount || 0)) return (a.paidAmount || 0) > (b.paidAmount || 0) ? a : b
-  return a
+  let winner = a
+  if (a.cancelledAt && !b.cancelledAt) winner = a
+  else if (b.cancelledAt && !a.cancelledAt) winner = b
+  else if (Boolean(a.cashSettledAt) !== Boolean(b.cashSettledAt)) winner = a.cashSettledAt ? a : b
+  else if ((a.paidAmount || 0) !== (b.paidAmount || 0)) winner = (a.paidAmount || 0) > (b.paidAmount || 0) ? a : b
+  if (wasSoldOffline(a) || wasSoldOffline(b) || wasSoldOffline(winner)) {
+    return winner.soldOffline ? winner : { ...winner, soldOffline: true }
+  }
+  return winner
 }
 
 /** Une vendas por id — contingência local não pode sumir num pull da nuvem. */
@@ -1222,7 +1230,18 @@ export const useStore = create<Store>()(
         const raffles = data.raffles
         const auditLog = mergeAudit(data.auditLog, get().auditLog)
         const base = mergeSales(data.sales, mergeSales(get().sales, loadPendingSales()))
-        const sales = mergeSales(base, salesFromAudit(auditLog, base, members, raffles))
+        const fromAudit = mergeSales(base, salesFromAudit(auditLog, base, members, raffles))
+        const contingenciaIds = new Set(
+          (auditLog || [])
+            .filter((e) => e.action === 'venda.contingencia')
+            .map((e) => e.ref?.saleId)
+            .filter((id): id is string => Boolean(id)),
+        )
+        const sales = fromAudit.map((s) =>
+          s.soldOffline || contingenciaIds.has(s.id) || /contingenc/i.test(s.notes || '')
+            ? { ...s, soldOffline: true }
+            : s,
+        )
         set({
           raffles,
           members,

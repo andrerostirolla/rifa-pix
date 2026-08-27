@@ -94,6 +94,18 @@ function pct(part: number, total: number) {
   return `${Math.round((part / total) * 100)}%`
 }
 
+/** Quantidade de números numa ação de auditoria (meta Números ou Quantidade). */
+function auditNumberQty(entry: AuditEntry): number {
+  const raw = entry.meta?.Números || ''
+  const nums = raw
+    .split(/[^\d]+/)
+    .map((x) => Number(x))
+    .filter((n) => Number.isFinite(n) && n > 0)
+  if (nums.length) return nums.length
+  const q = Number(String(entry.meta?.Quantidade || '').replace(/[^\d]/g, ''))
+  return Number.isFinite(q) && q > 0 ? q : 0
+}
+
 /** Linhas do popover de auditoria: usa os campos gravados e cai no texto simples se não houver. */
 function auditPopoverLines(entry: AuditEntry, situacao?: string | null) {
   const meta: Record<string, string> = { ...(entry.meta || {}) }
@@ -566,9 +578,42 @@ export default function LocalApp() {
     const recebido =
       pixRecebido + cashSales.filter((s) => Boolean(s.cashSettledAt)).reduce((a, s) => a + s.totalAmount, 0)
     const aPrestar = cashSales.filter((s) => !s.cashSettledAt).reduce((a, s) => a + s.totalAmount, 0)
-    const contingenciaNumeros = scoped
-      .filter((s) => s.soldOffline || /contingenc/i.test(s.notes || ''))
-      .reduce((a, s) => a + s.numbers.length, 0)
+
+    const eventNames = new Set(escolhidos.flatMap((r) => [r.eventName, r.name].filter(Boolean)))
+    const contingenciaSaleIds = new Set(
+      (auditLog || [])
+        .filter((e) => e.action === 'venda.contingencia')
+        .map((e) => e.ref?.saleId)
+        .filter((id): id is string => Boolean(id)),
+    )
+    const countedContingencia = new Set<string>()
+    let contingenciaNumeros = 0
+    for (const s of scoped) {
+      if (s.soldOffline || contingenciaSaleIds.has(s.id) || /contingenc/i.test(s.notes || '')) {
+        countedContingencia.add(s.id)
+        contingenciaNumeros += s.numbers.length
+      }
+    }
+    for (const e of auditLog || []) {
+      if (e.action !== 'venda.contingencia') continue
+      const saleId = e.ref?.saleId
+      if (saleId && countedContingencia.has(saleId)) continue
+      const sale = saleId ? sales.find((s) => s.id === saleId) : undefined
+      if (sale?.cancelledAt) continue
+      if (reportEventId) {
+        if (sale && sale.raffleId !== reportEventId) continue
+        if (!sale && e.meta?.Evento && !eventNames.has(e.meta.Evento)) continue
+      }
+      if (sale) {
+        if (saleId) countedContingencia.add(saleId)
+        contingenciaNumeros += sale.numbers.length
+        continue
+      }
+      const key = saleId || e.id
+      if (countedContingencia.has(key)) continue
+      countedContingencia.add(key)
+      contingenciaNumeros += auditNumberQty(e)
+    }
     const onlineNumeros = Math.max(0, vendidosQtd - contingenciaNumeros)
 
     const canceladas = sales.filter(
@@ -602,7 +647,7 @@ export default function LocalApp() {
         valor: porTempo.reduce((a, s) => a + s.totalAmount, 0),
       },
     }
-  }, [activeSales, sales, raffles, reportEventId])
+  }, [activeSales, sales, raffles, reportEventId, auditLog])
 
   const baixaPendingSales = useMemo(() => {
     if (!baixaMemberId) return []
@@ -3182,16 +3227,18 @@ export default function LocalApp() {
                 <span>Números em contingência</span>
                 <strong>{reportGlobals.contingenciaNumeros}</strong>
                 <em>
+                  {reportGlobals.contingenciaNumeros} nº vendidos sem rede ·{' '}
                   {pct(reportGlobals.contingenciaNumeros, reportGlobals.totalNumeros)} de{' '}
-                  {reportGlobals.totalNumeros} nº · sem rede no momento da venda
+                  {reportGlobals.totalNumeros} nº
                 </em>
               </article>
               <article className="metric">
                 <span>Números vendidos online</span>
                 <strong>{reportGlobals.onlineNumeros}</strong>
                 <em>
+                  {reportGlobals.onlineNumeros} nº com nuvem ·{' '}
                   {pct(reportGlobals.onlineNumeros, reportGlobals.totalNumeros)} de{' '}
-                  {reportGlobals.totalNumeros} nº · com nuvem no momento da venda
+                  {reportGlobals.totalNumeros} nº
                 </em>
               </article>
               <article className="metric">

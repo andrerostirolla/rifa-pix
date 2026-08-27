@@ -77,7 +77,14 @@ function isNewer(remoteIso: string, localIso: string) {
 function mergeContingencyState(remote: AppState, local: AppState): AppState {
   const salesById = new Map((remote.sales || []).map((s) => [s.id, s]))
   for (const s of local.sales || []) {
-    if (!salesById.has(s.id)) salesById.set(s.id, s)
+    const cur = salesById.get(s.id)
+    if (!cur) {
+      salesById.set(s.id, s)
+      continue
+    }
+    if ((s.soldOffline || /contingenc/i.test(s.notes || '')) && !cur.soldOffline) {
+      salesById.set(s.id, { ...cur, soldOffline: true, notes: cur.notes || s.notes })
+    }
   }
   const chargesById = new Map((remote.pixCharges || []).map((c) => [c.id, c]))
   for (const c of local.pixCharges || []) {

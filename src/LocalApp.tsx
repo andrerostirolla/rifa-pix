@@ -24,7 +24,15 @@ import { formatErr } from './lib/errors'
 import { brl, cancelInfo, formatNumbers, isPixChargeExpired, useStore } from './store'
 import { TeamChat } from './TeamChat'
 import { InstallAppButton } from './InstallAppButton'
-import type { AuditEntry, CashDestination, PaymentMethod, PaymentStatus, PixDestination } from './types'
+import type {
+  AuditEntry,
+  CashDestination,
+  PaymentMethod,
+  PaymentStatus,
+  PixCharge,
+  PixDestination,
+  Sale,
+} from './types'
 
 type AdminTab =
   | 'painel'
@@ -87,10 +95,41 @@ function pct(part: number, total: number) {
 }
 
 /** Linhas do popover de auditoria: usa os campos gravados e cai no texto simples se não houver. */
-function auditPopoverLines(entry: AuditEntry) {
-  const metaLines = Object.entries(entry.meta || {}).map(([k, v]) => `${k}: ${v}`)
+function auditPopoverLines(entry: AuditEntry, situacao?: string | null) {
+  const meta: Record<string, string> = { ...(entry.meta || {}) }
+  // A situação gravada envelhece (ex.: "Aguardando pagamento" de um PIX que já foi pago):
+  // quando dá para saber o estado atual da venda, ele manda.
+  if (situacao) meta['Situação'] = situacao
+  const metaLines = Object.entries(meta).map(([k, v]) => `${k}: ${v}`)
   if (metaLines.length) return metaLines
   return [entry.detail || 'Sem detalhes gravados nesta ação.']
+}
+
+/** Situação de agora da venda ligada à ação — o PIX pode ter sido pago, cancelado ou vencido depois. */
+function liveAuditSituacao(entry: AuditEntry, sales: Sale[], pixCharges: PixCharge[]): string | null {
+  if (!entry.action.startsWith('venda.')) return null
+
+  const txid = entry.ref?.txid || entry.meta?.TXID
+  let charge = txid ? pixCharges.find((c) => c.txid === txid) : undefined
+  const saleId = entry.ref?.saleId || charge?.saleId
+  const sale = saleId ? sales.find((s) => s.id === saleId) : undefined
+  if (!sale) return null
+  if (!charge) {
+    const ofSale = pixCharges.filter((c) => c.saleId === sale.id)
+    charge = ofSale[ofSale.length - 1]
+  }
+
+  if (sale.cancelledAt) {
+    return cancelInfo(sale, charge)?.byMember ? 'Cancelado pelo membro' : 'PIX cancelado por tempo (expirou)'
+  }
+  if (sale.paymentMethod === 'pix') {
+    if (sale.status === 'quitado') return 'PIX efetivado'
+    if (isPixChargeExpired(charge)) return 'PIX cancelado por tempo (expirou)'
+    return 'Aguardando pagamento'
+  }
+  if (sale.cashSettledAt) return 'Dinheiro prestado (conta da loja)'
+  if ((sale.cashDestination || 'vendedor') === 'loja') return 'Dinheiro entregue na loja'
+  return 'Dinheiro com o membro'
 }
 
 function askProceed(message = 'Tem certeza que deseja prosseguir com essa operação?') {
@@ -769,19 +808,24 @@ export default function LocalApp() {
           return
         }
 
-        logAudit('venda.pix_gerada', `${buyerName} · ${brl(totalAmount)} · nº ${formatNumbers(selectedNumbers)}`, {
-          'Forma de pagamento': 'PIX (conta da loja)',
-          Comprador: buyerName,
-          Números: formatNumbers(selectedNumbers),
-          Quantidade: `${selectedNumbers.length}`,
-          Valor: brl(totalAmount),
-          TXID: chargeTxid,
-          Provedor: isDemo ? 'Simulado (sem Sicoob)' : 'Sicoob',
-          'QR válido até': expiresAt ? new Date(expiresAt).toLocaleString('pt-BR') : '30 min',
-          Vendedor: members.find((m) => m.id === sellerId)?.name || who,
-          Evento: raffles.find((r) => r.id === raffleId)?.eventName,
-          Situação: 'Aguardando pagamento',
-        })
+        logAudit(
+          'venda.pix_gerada',
+          `${buyerName} · ${brl(totalAmount)} · nº ${formatNumbers(selectedNumbers)}`,
+          {
+            'Forma de pagamento': 'PIX (conta da loja)',
+            Comprador: buyerName,
+            Números: formatNumbers(selectedNumbers),
+            Quantidade: `${selectedNumbers.length}`,
+            Valor: brl(totalAmount),
+            TXID: chargeTxid,
+            Provedor: isDemo ? 'Simulado (sem Sicoob)' : 'Sicoob',
+            'QR válido até': expiresAt ? new Date(expiresAt).toLocaleString('pt-BR') : '30 min',
+            Vendedor: members.find((m) => m.id === sellerId)?.name || who,
+            Evento: raffles.find((r) => r.id === raffleId)?.eventName,
+            Situação: 'Aguardando pagamento',
+          },
+          { saleId: result.sale.id, txid: chargeTxid },
+        )
         setPixPaid(false)
         setPixModal({
           buyerName,
@@ -806,7 +850,11 @@ export default function LocalApp() {
 
       const saleMeta = {
         'Forma de pagamento': memberCash ? 'Dinheiro' : 'PIX',
-        Situação: memberCash ? 'Dinheiro recebido pelo vendedor' : 'PIX efetivado',
+        Situação: memberCash
+          ? resolvedCashDest === 'loja'
+            ? 'Dinheiro entregue na loja'
+            : 'Dinheiro com o membro'
+          : 'PIX efetivado',
         Comprador: buyerName,
         Números: formatNumbers(selectedNumbers),
         Quantidade: `${selectedNumbers.length}`,
@@ -821,21 +869,30 @@ export default function LocalApp() {
       if (memberCash) {
         if (offlineContingency) {
           showToast('Contingência: venda em dinheiro salva neste celular. Sobe pra nuvem quando a rede voltar.')
-          logAudit('venda.contingencia', `${buyerName} · ${brl(totalAmount)}`, {
-            ...saleMeta,
-            Situação: 'Salva offline — sobe quando a rede voltar',
-          })
+          logAudit(
+            'venda.contingencia',
+            `${buyerName} · ${brl(totalAmount)}`,
+            { ...saleMeta, Envio: 'Salva offline — sobe quando a rede voltar' },
+            { saleId: result.sale.id },
+          )
         } else {
           showToast('Venda em dinheiro registrada. Ficou com você — preste contas à entidade.')
-          logAudit('venda.dinheiro', `${buyerName} · ${brl(totalAmount)}`, saleMeta)
+          logAudit('venda.dinheiro', `${buyerName} · ${brl(totalAmount)}`, saleMeta, {
+            saleId: result.sale.id,
+          })
         }
       } else {
         showToast(proofPath ? 'Venda registrada (comprovante na nuvem).' : 'Venda registrada.')
-        logAudit('venda.registrar', `${buyerName} · ${brl(totalAmount)}`, {
-          ...saleMeta,
-          Comprovante: proofPath ? 'Imagem anexada' : undefined,
-          TXID: String(fd.get('proofTxid') || '') || undefined,
-        })
+        logAudit(
+          'venda.registrar',
+          `${buyerName} · ${brl(totalAmount)}`,
+          {
+            ...saleMeta,
+            Comprovante: proofPath ? 'Imagem anexada' : undefined,
+            TXID: String(fd.get('proofTxid') || '') || undefined,
+          },
+          { saleId: result.sale.id },
+        )
       }
     } catch (err) {
       if (createdSaleId && memberPix) {
@@ -883,15 +940,17 @@ export default function LocalApp() {
         'venda.pix_cancelada',
         `${sale?.buyerName || 'comprador'} · nº ${formatNumbers(result.numbers)} · motivo: ${reason}`,
         {
-          Situação: 'Cancelado por membro',
+          Situação: 'Cancelado pelo membro',
           Motivo: reason,
           'Forma de pagamento': 'PIX (não foi pago)',
           Comprador: sale?.buyerName,
           Números: formatNumbers(result.numbers),
+          Quantidade: `${result.numbers.length}`,
           Valor: sale ? brl(sale.totalAmount) : undefined,
           TXID: pixCharges.find((c) => c.saleId === ask.saleId)?.txid,
           'Cancelado por': who,
         },
+        { saleId: ask.saleId },
       )
       try {
         await flushWorkspaceToCloud(useStore.getState().exportSnapshot())
@@ -948,17 +1007,22 @@ export default function LocalApp() {
     setProofDataUrl('')
     if (buyer && amount != null) {
       showToast(`Venda PIX para ${buyer} no valor ${brl(amount)} recebida com sucesso.`)
-      logAudit('venda.pix', `${buyer} · ${brl(amount)}`, {
-        'Forma de pagamento': 'PIX',
-        Situação: 'PIX efetivado',
-        Comprador: buyer,
-        Valor: brl(amount),
-        TXID: txid,
-        Recebimento: 'PIX na conta da loja',
-        Números: sale ? formatNumbers(sale.numbers) : undefined,
-        Quantidade: sale ? `${sale.numbers.length}` : undefined,
-        Vendedor: who,
-      })
+      logAudit(
+        'venda.pix',
+        `${buyer} · ${brl(amount)}`,
+        {
+          'Forma de pagamento': 'PIX',
+          Situação: 'PIX efetivado',
+          Comprador: buyer,
+          Valor: brl(amount),
+          TXID: txid,
+          Recebimento: 'PIX na conta da loja',
+          Números: sale ? formatNumbers(sale.numbers) : undefined,
+          Quantidade: sale ? `${sale.numbers.length}` : undefined,
+          Vendedor: who,
+        },
+        { saleId: sale?.id, txid },
+      )
     }
   }
 
@@ -1012,7 +1076,7 @@ export default function LocalApp() {
       setBaixaConfirmOpen(false)
       logAudit('dinheiro.liquidar', `${member.name} · ${brl(result.amount)}`, {
         'Forma de pagamento': 'Dinheiro',
-        Situação: 'Dinheiro prestado à loja',
+        Situação: 'Dinheiro prestado (conta da loja)',
         Membro: member.name,
         Valor: brl(result.amount),
         Vendas: `${stillPending.length} venda(s)`,
@@ -1097,7 +1161,16 @@ export default function LocalApp() {
         const settled = settlePixChargeByTxid(txid, result.amount, result.saleId || saleId)
         if (settled.ok && settled.reactivated) {
           showToast('Atenção: este PIX estava cancelado e o pagamento entrou. Avise o ADM.')
-          logAudit('venda.pix_pago_apos_cancelar', txid)
+          logAudit(
+            'venda.pix_pago_apos_cancelar',
+            txid,
+            {
+              'Forma de pagamento': 'PIX',
+              Situação: 'PIX efetivado (entrou depois do cancelamento)',
+              TXID: txid,
+            },
+            { saleId: result.saleId || saleId, txid },
+          )
         }
         try {
           const remote = await fetchByAccessCode(cloudSession.workspace.accessCode)
@@ -1241,7 +1314,7 @@ export default function LocalApp() {
         'venda.pix_expirada',
         `${expired.length} venda(s) cancelada(s) por tempo${freed.length ? ` · nº ${formatNumbers(freed)} liberado(s)` : ''}`,
         {
-          Situação: 'Cancelado por tempo',
+          Situação: 'PIX cancelado por tempo (expirou)',
           Motivo: 'Passou o prazo do PIX sem o comprador pagar',
           'Forma de pagamento': 'PIX (não foi pago)',
           Vendas: `${expired.length}`,
@@ -1948,7 +2021,7 @@ export default function LocalApp() {
                         label="Ver detalhes"
                         title={auditActionLabel[a.action] || a.action}
                         lines={[
-                          ...auditPopoverLines(a),
+                          ...auditPopoverLines(a, liveAuditSituacao(a, sales, pixCharges)),
                           `Quem: ${a.actorName}`,
                           `Quando: ${new Date(a.at).toLocaleString('pt-BR')}`,
                         ]}
@@ -3659,9 +3732,9 @@ export default function LocalApp() {
                       auditActionLabel[a.action] || a.action,
                       a.action,
                       a.detail || '',
-                      Object.entries(a.meta || {})
-                        .map(([k, v]) => `${k}: ${v}`)
-                        .join(' | '),
+                      a.meta || a.ref
+                        ? auditPopoverLines(a, liveAuditSituacao(a, sales, pixCharges)).join(' | ')
+                        : '',
                     ]),
                   ])
                   showToast('CSV da auditoria exportado.')
@@ -3740,7 +3813,7 @@ export default function LocalApp() {
                               label="Ver detalhes"
                               title={auditActionLabel[a.action] || a.action}
                               lines={[
-                                ...auditPopoverLines(a),
+                                ...auditPopoverLines(a, liveAuditSituacao(a, sales, pixCharges)),
                                 `Quem: ${a.actorName}`,
                                 `Quando: ${new Date(a.at).toLocaleString('pt-BR')}`,
                               ]}

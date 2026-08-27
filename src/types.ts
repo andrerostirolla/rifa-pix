@@ -160,6 +160,8 @@ export interface AuditEntry {
   detail?: string
   /** Campos extras mostrados no popover de detalhes (rótulo → valor) */
   meta?: Record<string, string>
+  /** Aponta para a venda/cobrança da ação, para o detalhe mostrar a situação atual dela */
+  ref?: { saleId?: string; txid?: string }
 }
 
 export interface AppState {

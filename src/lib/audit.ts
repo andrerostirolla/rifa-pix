@@ -16,7 +16,12 @@ function actorNameNow() {
   return 'ADM'
 }
 
-export function logAudit(action: string, detail?: string, meta?: Record<string, string | undefined>) {
+export function logAudit(
+  action: string,
+  detail?: string,
+  meta?: Record<string, string | undefined>,
+  ref?: { saleId?: string; txid?: string },
+) {
   const cleanMeta = Object.fromEntries(
     Object.entries(meta || {}).filter(([, v]) => Boolean(v && String(v).trim())),
   ) as Record<string, string>
@@ -28,6 +33,7 @@ export function logAudit(action: string, detail?: string, meta?: Record<string, 
     action,
     detail: detail?.trim() || undefined,
     meta: Object.keys(cleanMeta).length ? cleanMeta : undefined,
+    ref: ref?.saleId || ref?.txid ? { saleId: ref.saleId, txid: ref.txid } : undefined,
   }
   useStore.getState().pushAudit(entry)
 

@@ -24,6 +24,7 @@ import { formatErr } from './lib/errors'
 import { brl, cancelInfo, formatNumbers, isPixChargeExpired, useStore } from './store'
 import { TeamChat } from './TeamChat'
 import { InstallAppButton } from './InstallAppButton'
+import { formatDrawDate, parseDrawDate, todaySalesQuote } from './lib/salesQuotes'
 import type {
   AuditEntry,
   CashDestination,
@@ -389,10 +390,8 @@ export default function LocalApp() {
     }
 
     const proximoSorteio = eventosBase
-      .map((r) => r.drawDate)
-      .filter((d): d is string => Boolean(d))
-      .map((d) => new Date(d))
-      .filter((d) => !Number.isNaN(d.getTime()))
+      .map((r) => parseDrawDate(r.drawDate))
+      .filter((d): d is Date => Boolean(d))
       .sort((a, b) => a.getTime() - b.getTime())
       .find((d) => d.getTime() >= startOfDay)
     const diasSorteio = proximoSorteio
@@ -410,6 +409,31 @@ export default function LocalApp() {
     const menosVendeu =
       porMembro.length > 1 ? [...porMembro].sort((a, b) => a.vendidos - b.vendidos)[0] : null
 
+    const liderDo = (list: typeof activeSales) => {
+      const map = new Map<string, { name: string; vendidos: number; valor: number }>()
+      for (const s of list) {
+        const name = members.find((m) => m.id === s.memberId)?.name || '—'
+        const cur = map.get(s.memberId) || { name, vendidos: 0, valor: 0 }
+        cur.vendidos += s.numbers.length
+        cur.valor += s.totalAmount
+        map.set(s.memberId, cur)
+      }
+      return [...map.values()].sort((a, b) => b.vendidos - a.vendidos || b.valor - a.valor)[0] || null
+    }
+
+    const melhorTicket =
+      members
+        .map((m) => {
+          const ms = activeSales.filter((s) => s.memberId === m.id)
+          return {
+            name: m.name,
+            ticket: ms.length ? value(ms) / ms.length : 0,
+            vendas: ms.length,
+          }
+        })
+        .filter((x) => x.vendas > 0)
+        .sort((a, b) => b.ticket - a.ticket)[0] || null
+
     const porComprador = new Map<string, { name: string; numeros: number; valor: number }>()
     for (const s of activeSales) {
       const key = s.buyerName.trim().toLowerCase() || '—'
@@ -425,9 +449,9 @@ export default function LocalApp() {
 
     const totalValor = value(activeSales)
     return {
-      hoje: { qtd: hoje.length, valor: value(hoje) },
-      semana: { qtd: semana.length, valor: value(semana) },
-      mes: { qtd: mes.length, valor: value(mes) },
+      hoje: { qtd: hoje.length, valor: value(hoje), lider: liderDo(hoje) },
+      semana: { qtd: semana.length, valor: value(semana), lider: liderDo(semana) },
+      mes: { qtd: mes.length, valor: value(mes), lider: liderDo(mes) },
       total: { qtd: activeSales.length, valor: totalValor },
       diasSorteio,
       proximoSorteio,
@@ -445,9 +469,26 @@ export default function LocalApp() {
       maiorComprador,
       menorComprador,
       ticketMedio: activeSales.length ? totalValor / activeSales.length : 0,
+      melhorTicket,
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSales, raffles, members, blocks])
+
+  const memberDraw = useMemo(() => {
+    const local = parseDrawDate(raffles.find((r) => r.id === currentRaffleId)?.drawDate)
+    if (local) {
+      const start = new Date()
+      start.setHours(0, 0, 0, 0)
+      return {
+        date: local,
+        dias: Math.round((local.getTime() - start.getTime()) / 86_400_000),
+      }
+    }
+    if (resumo.proximoSorteio && resumo.diasSorteio != null) {
+      return { date: resumo.proximoSorteio, dias: resumo.diasSorteio }
+    }
+    return null
+  }, [raffles, currentRaffleId, resumo.proximoSorteio, resumo.diasSorteio])
 
   const reports = useMemo(() => {
     return members
@@ -1476,6 +1517,28 @@ export default function LocalApp() {
         </div>
       </header>
 
+      {!isAdmin && (
+        <aside
+          className={`draw-countdown ${
+            memberDraw == null
+              ? ''
+              : memberDraw.dias <= 30
+                ? 'prazo-urgente'
+                : memberDraw.dias <= 60
+                  ? 'prazo-atencao'
+                  : 'prazo-tranquilo'
+          }`}
+        >
+          <span>Dias para o sorteio</span>
+          <strong>{memberDraw == null ? '—' : memberDraw.dias}</strong>
+          {memberDraw ? (
+            <b className="prazo-data">{formatDrawDate(memberDraw.date)}</b>
+          ) : (
+            <em>sem data de sorteio neste evento</em>
+          )}
+        </aside>
+      )}
+
       {/* MEMBER VIEW */}
       {!isAdmin && memberTab === 'blocos' && !openBlock && (
         <section className="panel">
@@ -1876,17 +1939,26 @@ export default function LocalApp() {
               <article className="summary-card pink-1">
                 <span>Vendas hoje</span>
                 <strong>{resumo.hoje.qtd}</strong>
-                <em>{brl(resumo.hoje.valor)}</em>
+                <em>
+                  {brl(resumo.hoje.valor)}
+                  {resumo.hoje.lider ? ` · ${resumo.hoje.lider.name}` : ''}
+                </em>
               </article>
               <article className="summary-card pink-2">
                 <span>Vendas na semana</span>
                 <strong>{resumo.semana.qtd}</strong>
-                <em>{brl(resumo.semana.valor)} · últimos 7 dias</em>
+                <em>
+                  {brl(resumo.semana.valor)} · últimos 7 dias
+                  {resumo.semana.lider ? ` · ${resumo.semana.lider.name}` : ''}
+                </em>
               </article>
               <article className="summary-card pink-3">
                 <span>Vendas no mês</span>
                 <strong>{resumo.mes.qtd}</strong>
-                <em>{brl(resumo.mes.valor)}</em>
+                <em>
+                  {brl(resumo.mes.valor)}
+                  {resumo.mes.lider ? ` · ${resumo.mes.lider.name}` : ''}
+                </em>
               </article>
               <article className="summary-card pink-4">
                 <span>Vendas no total</span>
@@ -1907,11 +1979,11 @@ export default function LocalApp() {
             >
               <span>Dias para o sorteio</span>
               <strong>{resumo.diasSorteio == null ? '—' : resumo.diasSorteio}</strong>
-              <em>
-                {resumo.proximoSorteio
-                  ? resumo.proximoSorteio.toLocaleDateString('pt-BR')
-                  : 'sem data de sorteio'}
-              </em>
+              {resumo.proximoSorteio ? (
+                <b className="prazo-data">{formatDrawDate(resumo.proximoSorteio)}</b>
+              ) : (
+                <em>sem data de sorteio</em>
+              )}
             </article>
             <div className="summary-group summary-group--caixa">
               <article className="summary-card ok">
@@ -1990,7 +2062,11 @@ export default function LocalApp() {
             <article className="summary-card summary-solo summary-solo--ticket">
               <span>Ticket médio geral</span>
               <strong>{brl(resumo.ticketMedio)}</strong>
-              <em>por venda registrada</em>
+              <em>
+                {resumo.melhorTicket
+                  ? `${resumo.melhorTicket.name} · ${brl(resumo.melhorTicket.ticket)}`
+                  : 'por venda registrada'}
+              </em>
             </article>
           </div>
           {suggestions.length > 0 && <h3>Sugestões TXID</h3>}
@@ -4015,6 +4091,14 @@ export default function LocalApp() {
         />
       )}
       {toast && <div className="toast">{toast}</div>}
+      <footer className="app-motto">
+        <p>
+          <strong>
+            <em>“{todaySalesQuote()}”</em>
+          </strong>
+          <span className="bora"> BORA PRA CIMA!!!</span>
+        </p>
+      </footer>
       <TeamChat />
     </div>
   )

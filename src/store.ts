@@ -253,7 +253,7 @@ type Store = AppState & {
   assignBlock: (blockId: string, memberId: string) => { ok: boolean; error?: string }
   /** Transfere bloco de um membro para outro (com rastro). */
   transferBlock: (blockId: string, toMemberId: string) => { ok: boolean; error?: string }
-  unassignBlock: (blockId: string) => void
+  unassignBlock: (blockId: string) => { ok: boolean; error?: string }
   assignRange: (input: { memberId: string; raffleId: string; fromNumber: number; toNumber: number }) => {
     ok: boolean
     error?: string
@@ -507,13 +507,21 @@ export const useStore = create<Store>()(
           members: s.members.map((m) => (m.id === id ? { ...m, ...patch } : m)),
         })),
 
-      removeMember: (id) =>
+      removeMember: (id) => {
+        const soldKeep = new Set(
+          get()
+            .blocks.filter((b) => b.memberId === id && get().blockStats(b.id).open <= 0)
+            .map((b) => b.id),
+        )
         set((s) => ({
           members: s.members.filter((m) => m.id !== id),
           numberRanges: s.numberRanges.filter((r) => r.memberId !== id),
-          blocks: s.blocks.map((b) => (b.memberId === id ? { ...b, memberId: undefined } : b)),
+          blocks: s.blocks.map((b) =>
+            b.memberId === id && !soldKeep.has(b.id) ? { ...b, memberId: undefined } : b,
+          ),
           memberSettlements: s.memberSettlements.filter((x) => x.memberId !== id),
-        })),
+        }))
+      },
 
       assignBlock: (blockId, memberId) => {
         const block = get().blocks.find((b) => b.id === blockId)
@@ -568,11 +576,16 @@ export const useStore = create<Store>()(
 
       unassignBlock: (blockId) => {
         const block = get().blocks.find((b) => b.id === blockId)
-        if (!block?.memberId) {
+        if (!block) return { ok: false, error: 'Bloco não encontrado.' }
+        const st = get().blockStats(blockId)
+        if (st.open <= 0) {
+          return { ok: false, error: 'Bloco vendido não pode ser liberado.' }
+        }
+        if (!block.memberId) {
           set((s) => ({
             blocks: s.blocks.map((b) => (b.id === blockId ? { ...b, memberId: undefined } : b)),
           }))
-          return
+          return { ok: true }
         }
         const fromMemberId = block.memberId
         set((s) => ({
@@ -585,6 +598,7 @@ export const useStore = create<Store>()(
             note: 'Bloco liberado',
           }),
         }))
+        return { ok: true }
       },
 
       assignRange: (input) => {

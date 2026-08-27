@@ -550,6 +550,16 @@ export default function LocalApp() {
         const cancMembro = canceladas.filter((s) => s.cancelReason === 'membro').length
         const cancTempo = canceladas.length - cancMembro
         const pixVendedorOpen = Math.max(0, Math.round((pixVendedor - settledPix) * 100) / 100)
+        const bs = memberBlockStats(m.id, reportEventId || undefined)
+        const memberBlocksList = blocks.filter(
+          (b) => b.memberId === m.id && (!reportEventId || b.raffleId === reportEventId),
+        )
+        let unsoldValor = 0
+        for (const b of memberBlocksList) {
+          const st = blockStats(b.id)
+          unsoldValor += st.open * (raffles.find((r) => r.id === b.raffleId)?.ticketPrice || 0)
+        }
+        const ticketMedio = saleCount ? expected / saleCount : 0
         return {
           member: m,
           mSales,
@@ -578,6 +588,9 @@ export default function LocalApp() {
           cancMembro,
           cancTempo,
           dueTotal: cashOpen,
+          unsoldNumbers: bs.openNumbers,
+          unsoldValor: Math.round(unsoldValor * 100) / 100,
+          ticketMedio,
         }
       })
       // Ranking: do maior vendedor para o menor
@@ -585,7 +598,7 @@ export default function LocalApp() {
         (a, b) =>
           b.soldCount - a.soldCount || b.expected - a.expected || a.member.name.localeCompare(b.member.name),
       )
-  }, [members, activeSales, sales, memberSettlements, reportEventId, pixCharges, raffles])
+  }, [members, activeSales, sales, memberSettlements, reportEventId, pixCharges, raffles, blocks, memberBlockStats, blockStats])
 
   const selectedReport = useMemo(
     () => reports.find((r) => r.member.id === reportMemberId) || null,
@@ -2311,7 +2324,7 @@ export default function LocalApp() {
             <div className="panel-head">
               <div>
                 <h2>Atribuir bloco livre</h2>
-                <p>Verde = livre. Cinza = já atribuído. Selecione um ou vários blocos de uma vez.</p>
+                <p>Verde = livre. Cinza = já atribuído. Vermelho = vendido (não mexe). Selecione só os livres.</p>
               </div>
             </div>
             <div className="form-grid">
@@ -2340,16 +2353,20 @@ export default function LocalApp() {
                     .map((b) => {
                       const st = blockStats(b.id)
                       const assigned = Boolean(b.memberId)
+                      const soldOut = st.open <= 0
                       const owner = members.find((m) => m.id === b.memberId)?.name || 'livre'
                       const selected = assignBlockIds.includes(b.id)
+                      const locked = assigned || soldOut
                       return (
                         <button
                           key={b.id}
                           type="button"
-                          className={`transfer-block ${assigned ? 'assigned' : 'free'} ${selected ? 'selected' : ''}`}
-                          disabled={assigned}
+                          className={`transfer-block ${
+                            soldOut ? 'sold-out' : assigned ? 'assigned' : 'free'
+                          } ${selected ? 'selected' : ''}`}
+                          disabled={locked}
                           onClick={() => {
-                            if (assigned) return
+                            if (locked) return
                             setAssignBlockIds((prev) =>
                               prev.includes(b.id) ? prev.filter((id) => id !== b.id) : [...prev, b.id],
                             )
@@ -2359,7 +2376,8 @@ export default function LocalApp() {
                           <span>
                             {b.fromNumber}–{b.toNumber} · {owner}
                           </span>
-                          <span>{assigned ? 'Indisponível' : `${st.open} abertos`}</span>
+                          <span>{soldOut ? 'Vendido' : assigned ? 'Indisponível' : `${st.open} abertos`}</span>
+                          {soldOut ? <span className="vendido-stamp">VENDIDO!</span> : null}
                         </button>
                       )
                     })}
@@ -2449,23 +2467,28 @@ export default function LocalApp() {
                           return (
                             <div key={b.id} className={`mini-block ${soldOut ? 'sold-out' : 'has-open'}`}>
                               {b.label} · {bs.open}/{bs.total}
-                              <button
-                                type="button"
-                                className="btn btn-ghost"
-                                onClick={() => {
-                                  if (!askProceed()) return
-                                  unassignBlock(b.id)
-                                  logAudit('bloco.liberar', `${b.label} · de ${m.name}`, {
-                                    Bloco: `${b.label} (nº ${b.fromNumber}–${b.toNumber})`,
-                                    De: m.name,
-                                    Situação: `${bs.open} de ${bs.total} nº ainda abertos`,
-                                    Evento: raffles.find((r) => r.id === b.raffleId)?.eventName,
-                                  })
-                                  requestCloudPush()
-                                }}
-                              >
-                                liberar
-                              </button>
+                              {soldOut ? (
+                                <span className="mini-vendido">VENDIDO!</span>
+                              ) : (
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost"
+                                  onClick={() => {
+                                    if (!askProceed()) return
+                                    const result = unassignBlock(b.id)
+                                    if (!result.ok) return showToast(result.error || 'Não foi possível liberar.')
+                                    logAudit('bloco.liberar', `${b.label} · de ${m.name}`, {
+                                      Bloco: `${b.label} (nº ${b.fromNumber}–${b.toNumber})`,
+                                      De: m.name,
+                                      Situação: `${bs.open} de ${bs.total} nº ainda abertos`,
+                                      Evento: raffles.find((r) => r.id === b.raffleId)?.eventName,
+                                    })
+                                    requestCloudPush()
+                                  }}
+                                >
+                                  liberar
+                                </button>
+                              )}
                             </div>
                           )
                         })}
@@ -2591,6 +2614,7 @@ export default function LocalApp() {
                             {b.fromNumber}–{b.toNumber} · {owner}
                           </span>
                           <span>{soldOut ? 'Vendido' : `${st.open} abertos`}</span>
+                          {soldOut ? <span className="vendido-stamp">VENDIDO!</span> : null}
                         </button>
                       )
                     })}
@@ -2852,6 +2876,7 @@ export default function LocalApp() {
                           </span>
                           <span className="block-open">{soldOut ? 'Vendido' : `${st.open} abertos`}</span>
                           <span className={owner ? 'owner-assigned' : 'owner-free'}>{owner || 'livre'}</span>
+                          {soldOut ? <span className="vendido-stamp">VENDIDO!</span> : null}
                         </div>
                       )
                     })}
@@ -3498,19 +3523,36 @@ export default function LocalApp() {
                   <div className="hero-metrics report-metrics">
                     <article className="metric">
                       <span>Esperado</span>
-                      <strong>{brl(selectedReport.expected)}</strong>
+                      <strong>{brl(selectedReport.unsoldValor)}</strong>
+                      <em>
+                        {selectedReport.unsoldNumbers} nº ainda não vendidos ·{' '}
+                        {pct(selectedReport.unsoldNumbers, reportGlobals.aVenderQtd)} do geral a vender
+                      </em>
                     </article>
                     <article className="metric">
                       <span>Recebido</span>
-                      <strong>{brl(selectedReport.received)}</strong>
+                      <strong>{brl(selectedReport.dinheiroNaLoja)}</strong>
+                      <em>
+                        PIX + contas já prestadas ·{' '}
+                        {pct(selectedReport.dinheiroNaLoja, reportGlobals.recebido)} do recebido geral
+                      </em>
                     </article>
                     <article className="metric">
-                      <span>Em aberto (vendas)</span>
-                      <strong>{brl(selectedReport.openAmount)}</strong>
+                      <span>Em aberto</span>
+                      <strong>{brl(selectedReport.cashOpen)}</strong>
+                      <em>
+                        dinheiro com o membro · {pct(selectedReport.cashOpen, reportGlobals.aPrestar)} do a
+                        prestar geral
+                      </em>
                     </article>
-                    <article className="metric due-metric">
-                      <span>A prestar à entidade</span>
-                      <strong>{brl(selectedReport.dueTotal)}</strong>
+                    <article className="metric">
+                      <span>Ticket médio</span>
+                      <strong>{brl(selectedReport.ticketMedio)}</strong>
+                      <em>
+                        {selectedReport.saleCount
+                          ? `${selectedReport.saleCount} venda(s) deste membro`
+                          : 'sem vendas'}
+                      </em>
                     </article>
                   </div>
 
@@ -3664,8 +3706,13 @@ export default function LocalApp() {
                         .map((b) => {
                           const st = blockStats(b.id)
                           const raffle = raffles.find((r) => r.id === b.raffleId)
+                          const soldOut = st.open <= 0
+                          const halfSold = !soldOut && st.total > 0 && st.sold >= st.total / 2
                           return (
-                            <tr key={b.id}>
+                            <tr
+                              key={b.id}
+                              className={soldOut ? 'row-sold-out' : halfSold ? 'row-half-sold' : ''}
+                            >
                               <td>{raffle?.eventName || raffle?.name || '—'}</td>
                               <td>{b.label}</td>
                               <td>
@@ -3811,7 +3858,7 @@ export default function LocalApp() {
                                 ? 'Transferência'
                                 : 'Liberação'
                           return (
-                            <tr key={t.id}>
+                            <tr key={t.id} className={t.kind === 'transfer' ? 'row-transfer' : ''}>
                               <td>{new Date(t.createdAt).toLocaleString('pt-BR')}</td>
                               <td>{kindLabel}</td>
                               <td>{raffle?.eventName || '—'}</td>

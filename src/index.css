@@ -926,7 +926,17 @@ tbody tr.row-assign:nth-of-type(even) > td {
 
 tbody tr.row-transfer > td,
 tbody tr.row-transfer:nth-of-type(even) > td {
-  background: rgba(230, 190, 50, 0.18);
+  background: rgba(230, 190, 50, 0.28);
+}
+
+tbody tr.row-sold-out > td,
+tbody tr.row-sold-out:nth-of-type(even) > td {
+  background: rgba(180, 35, 24, 0.16);
+}
+
+tbody tr.row-half-sold > td,
+tbody tr.row-half-sold:nth-of-type(even) > td {
+  background: rgba(37, 99, 235, 0.16);
 }
 
 .badge.livre {
@@ -1074,6 +1084,8 @@ tbody tr.row-transfer:nth-of-type(even) > td {
   border: 1px solid var(--line);
   min-height: 120px;
   background: rgba(255, 255, 255, 0.75);
+  position: relative;
+  overflow: hidden;
 }
 
 button.block-card {
@@ -1181,6 +1193,8 @@ button.block-card {
   border-radius: 12px;
   border: 1px solid var(--line);
   font-size: 0.82rem;
+  position: relative;
+  overflow: hidden;
 }
 
 .transfer-block.has-open {
@@ -1189,10 +1203,25 @@ button.block-card {
 }
 
 .transfer-block.sold-out {
-  background: rgba(180, 35, 24, 0.12);
+  background: rgba(180, 35, 24, 0.16);
   color: #8f1d14;
-  opacity: 0.85;
+  opacity: 1;
   cursor: not-allowed;
+}
+
+.vendido-stamp {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-weight: 800;
+  font-size: 0.92rem;
+  letter-spacing: 0.06em;
+  color: rgba(180, 35, 24, 0.48);
+  transform: rotate(-22deg);
+  pointer-events: none;
+  text-transform: uppercase;
+  font-family: 'Fraunces', Georgia, serif;
 }
 
 .transfer-block.free {
@@ -1536,7 +1565,15 @@ button.block-card {
 }
 
 .mini-block.sold-out {
-  background: rgba(180, 35, 24, 0.1);
+  background: rgba(180, 35, 24, 0.14);
+}
+
+.mini-vendido {
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  color: rgba(180, 35, 24, 0.7);
+  text-transform: uppercase;
 }
 
 .check-row {

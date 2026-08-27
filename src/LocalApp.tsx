@@ -773,7 +773,7 @@ export default function LocalApp() {
           'Forma de pagamento': 'PIX (conta da loja)',
           Comprador: buyerName,
           Números: formatNumbers(selectedNumbers),
-          Quantidade: `${selectedNumbers.length} nº`,
+          Quantidade: `${selectedNumbers.length}`,
           Valor: brl(totalAmount),
           TXID: chargeTxid,
           Provedor: isDemo ? 'Simulado (sem Sicoob)' : 'Sicoob',
@@ -806,9 +806,10 @@ export default function LocalApp() {
 
       const saleMeta = {
         'Forma de pagamento': memberCash ? 'Dinheiro' : 'PIX',
+        Situação: memberCash ? 'Dinheiro recebido pelo vendedor' : 'PIX efetivado',
         Comprador: buyerName,
         Números: formatNumbers(selectedNumbers),
-        Quantidade: `${selectedNumbers.length} nº`,
+        Quantidade: `${selectedNumbers.length}`,
         Valor: brl(totalAmount),
         Recebimento: memberCash
           ? `Dinheiro (${resolvedCashDest === 'loja' ? 'entregue na loja' : 'com o vendedor'})`
@@ -882,7 +883,7 @@ export default function LocalApp() {
         'venda.pix_cancelada',
         `${sale?.buyerName || 'comprador'} · nº ${formatNumbers(result.numbers)} · motivo: ${reason}`,
         {
-          Tipo: 'Cancelado por membro',
+          Situação: 'Cancelado por membro',
           Motivo: reason,
           'Forma de pagamento': 'PIX (não foi pago)',
           Comprador: sale?.buyerName,
@@ -948,11 +949,14 @@ export default function LocalApp() {
     if (buyer && amount != null) {
       showToast(`Venda PIX para ${buyer} no valor ${brl(amount)} recebida com sucesso.`)
       logAudit('venda.pix', `${buyer} · ${brl(amount)}`, {
+        'Forma de pagamento': 'PIX',
+        Situação: 'PIX efetivado',
         Comprador: buyer,
         Valor: brl(amount),
         TXID: txid,
         Recebimento: 'PIX na conta da loja',
         Números: sale ? formatNumbers(sale.numbers) : undefined,
+        Quantidade: sale ? `${sale.numbers.length}` : undefined,
         Vendedor: who,
       })
     }
@@ -1007,6 +1011,8 @@ export default function LocalApp() {
       setBaixaSelectedIds([])
       setBaixaConfirmOpen(false)
       logAudit('dinheiro.liquidar', `${member.name} · ${brl(result.amount)}`, {
+        'Forma de pagamento': 'Dinheiro',
+        Situação: 'Dinheiro prestado à loja',
         Membro: member.name,
         Valor: brl(result.amount),
         Vendas: `${stillPending.length} venda(s)`,
@@ -1235,7 +1241,7 @@ export default function LocalApp() {
         'venda.pix_expirada',
         `${expired.length} venda(s) cancelada(s) por tempo${freed.length ? ` · nº ${formatNumbers(freed)} liberado(s)` : ''}`,
         {
-          Tipo: 'Cancelado por tempo (o QR venceu)',
+          Situação: 'Cancelado por tempo',
           Motivo: 'Passou o prazo do PIX sem o comprador pagar',
           'Forma de pagamento': 'PIX (não foi pago)',
           Vendas: `${expired.length}`,

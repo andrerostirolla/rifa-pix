@@ -61,7 +61,7 @@ export function cancelInfo(sale?: Sale | null, charge?: PixCharge | null) {
   })()
   return {
     byMember,
-    label: byMember ? 'Cancelado por membro' : 'Cancelado por tempo',
+    label: byMember ? 'Cancelado por membro' : 'Pagamento expirado',
     at: sale.cancelledAt,
     who: byMember ? sale.cancelledBy || null : null,
     reason: byMember
@@ -827,17 +827,36 @@ export const useStore = create<Store>()(
         const expiredSaleIds: string[] = []
         set((s) => {
           const hitSaleIds = new Set<string>()
-          const pixCharges = s.pixCharges.map((c) => {
-            if (c.status !== 'pending') return c
+          const vencida = (c: PixCharge) => {
             const expMs = pixChargeExpiryMs(c)
-            if (expMs == null || expMs >= now) return c
-            const sale = s.sales.find((x) => x.id === c.saleId)
-            // Pago não expira, mesmo que o QR tenha vencido depois
-            if (sale?.status === 'quitado' || sale?.cancelledAt) return { ...c, status: 'expired' as const }
-            if (c.saleId) hitSaleIds.add(c.saleId)
-            return { ...c, status: 'expired' as const }
+            return expMs != null && expMs < now
+          }
+          /** Ainda dá para pagar? Então a venda não pode ser cancelada. */
+          const temCobrancaViva = (saleId: string) =>
+            s.pixCharges.some(
+              (c) => c.saleId === saleId && (c.status === 'paid' || (c.status === 'pending' && !vencida(c))),
+            )
+
+          const pixCharges = s.pixCharges.map((c) => {
+            const sale = c.saleId ? s.sales.find((x) => x.id === c.saleId) : undefined
+            const vendaAberta = Boolean(sale && !sale.cancelledAt && sale.status !== 'quitado')
+
+            if (c.status === 'pending') {
+              if (!vencida(c)) return c
+              // Pago não expira, mesmo que o QR tenha vencido depois
+              if (!vendaAberta) return { ...c, status: 'expired' as const }
+              if (c.saleId && !temCobrancaViva(c.saleId)) hitSaleIds.add(c.saleId)
+              return { ...c, status: 'expired' as const }
+            }
+
+            // Cobrança já vencida/cancelada na nuvem, mas a venda ficou aberta:
+            // sem isso o número ficaria preso e a venda em "aguardando pagamento".
+            if ((c.status === 'expired' || c.status === 'cancelled') && vendaAberta && c.saleId) {
+              if (!temCobrancaViva(c.saleId)) hitSaleIds.add(c.saleId)
+            }
+            return c
           })
-          if (!hitSaleIds.size) return s
+          if (!hitSaleIds.size) return { pixCharges }
           const at = new Date().toISOString()
           const sales = s.sales.map((sale) => {
             if (!hitSaleIds.has(sale.id) || sale.cancelledAt || sale.status === 'quitado') return sale

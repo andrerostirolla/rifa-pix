@@ -492,6 +492,10 @@ tbody tr.sale-cancelled:hover > td {
   background: #f8d9d5;
 }
 
+.cancel-tally {
+  color: #b42318;
+}
+
 .member-card-head {
   display: flex;
   align-items: center;

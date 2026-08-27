@@ -451,6 +451,11 @@ export default function LocalApp() {
           falha: uiCounts.falha,
         }
         const withProof = mSales.filter((s) => Boolean(proofUrlForSale(s, pixCharges))).length
+        const canceladas = sales.filter(
+          (s) => s.memberId === m.id && s.cancelledAt && (!reportEventId || s.raffleId === reportEventId),
+        )
+        const cancMembro = canceladas.filter((s) => s.cancelReason === 'membro').length
+        const cancTempo = canceladas.length - cancMembro
         const pixVendedorOpen = Math.max(0, Math.round((pixVendedor - settledPix) * 100) / 100)
         return {
           member: m,
@@ -477,6 +482,8 @@ export default function LocalApp() {
           ticketPrice,
           byStatus,
           withProof,
+          cancMembro,
+          cancTempo,
           dueTotal: cashOpen,
         }
       })
@@ -485,7 +492,7 @@ export default function LocalApp() {
         (a, b) =>
           b.soldCount - a.soldCount || b.expected - a.expected || a.member.name.localeCompare(b.member.name),
       )
-  }, [members, activeSales, memberSettlements, reportEventId, pixCharges, raffles])
+  }, [members, activeSales, sales, memberSettlements, reportEventId, pixCharges, raffles])
 
   const totals = useMemo(() => {
     return reports.reduce(
@@ -534,21 +541,43 @@ export default function LocalApp() {
       vendidosQtd += vend
       aVenderValor += Math.max(0, r.totalNumbers - vend) * r.ticketPrice
     }
+    const vendidoValor = scoped.reduce((a, s) => a + s.totalAmount, 0)
     const pixRecebido = scoped
       .filter((s) => s.paymentMethod === 'pix' && (s.pixDestination || 'entidade') === 'entidade')
       .reduce((a, s) => a + s.paidAmount, 0)
     const dinheiroRecebido = scoped
       .filter((s) => s.paymentMethod === 'dinheiro' && Boolean(s.cashSettledAt))
       .reduce((a, s) => a + s.totalAmount, 0)
+    const recebido = pixRecebido + dinheiroRecebido
+
+    const canceladas = sales.filter(
+      (s) => s.cancelledAt && (!reportEventId || s.raffleId === reportEventId),
+    )
+    const porMembro = canceladas.filter((s) => s.cancelReason === 'membro')
+    const porTempo = canceladas.filter((s) => s.cancelReason !== 'membro')
+
     return {
       esperado: aVenderValor,
-      recebido: pixRecebido + dinheiroRecebido,
+      aVenderQtd: Math.max(0, totalNumeros - vendidosQtd),
+      vendidoValor,
+      recebido,
+      aReceber: Math.max(0, Math.round((vendidoValor - recebido) * 100) / 100),
       pixRecebido,
       dinheiroRecebido,
       vendidosQtd,
       totalNumeros,
+      cancMembro: {
+        qtd: porMembro.length,
+        numeros: porMembro.reduce((a, s) => a + s.numbers.length, 0),
+        valor: porMembro.reduce((a, s) => a + s.totalAmount, 0),
+      },
+      cancTempo: {
+        qtd: porTempo.length,
+        numeros: porTempo.reduce((a, s) => a + s.numbers.length, 0),
+        valor: porTempo.reduce((a, s) => a + s.totalAmount, 0),
+      },
     }
-  }, [activeSales, raffles, reportEventId])
+  }, [activeSales, sales, raffles, reportEventId])
 
   const baixaPendingSales = useMemo(() => {
     if (!baixaMemberId) return []
@@ -1575,6 +1604,12 @@ export default function LocalApp() {
                       s.status === 'pendente' &&
                       !isPixChargeExpired(charge)
                     const canReopen = waitingPix && Boolean(charge?.copyPaste || charge?.qrCode)
+                    // QR já venceu mas a venda ainda não foi marcada: não deixa dizer "aguardando"
+                    const pixVencido =
+                      !cancelled &&
+                      s.paymentMethod === 'pix' &&
+                      s.status === 'pendente' &&
+                      isPixChargeExpired(charge)
                     return (
                       <tr key={s.id} className={cancelled ? 'sale-cancelled' : undefined}>
                         <td>{s.buyerName}</td>
@@ -1595,6 +1630,13 @@ export default function LocalApp() {
                               <>
                                 <br />
                                 <span className="pix-pending-hint">Aguardando pagamento…</span>
+                              </>
+                            ) : pixVencido ? (
+                              <>
+                                <br />
+                                <span className="pix-pending-hint">
+                                  Prazo do PIX venceu — números liberados
+                                </span>
                               </>
                             ) : null}
                           </div>
@@ -1636,6 +1678,8 @@ export default function LocalApp() {
                                 ]}
                               />
                             </div>
+                          ) : pixVencido ? (
+                            <span className="badge falha">Pagamento expirado</span>
                           ) : (
                             <span className={`badge ${s.status}`}>{statusLabel[s.status]}</span>
                           )}
@@ -2647,6 +2691,11 @@ export default function LocalApp() {
                 {sales.map((s) => {
                   const rowCharge = pixCharges.find((c) => c.saleId === s.id)
                   const cancel = cancelInfo(s, rowCharge)
+                  const pixVencido =
+                    !cancel &&
+                    s.paymentMethod === 'pix' &&
+                    s.status === 'pendente' &&
+                    isPixChargeExpired(rowCharge)
                   return (
                   <tr key={s.id} className={s.cancelledAt ? 'sale-cancelled' : undefined}>
                     <td>{members.find((m) => m.id === s.memberId)?.name || '—'}</td>
@@ -2672,6 +2721,22 @@ export default function LocalApp() {
                               cancel.reason,
                               cancel.who ? `Cancelado por: ${cancel.who}` : null,
                               `Em ${new Date(cancel.at).toLocaleString('pt-BR')}`,
+                            ]}
+                          />
+                        </div>
+                      ) : pixVencido ? (
+                        <div className="sale-status-actions">
+                          <span className="badge falha">Pagamento expirado</span>
+                          <InfoPopover
+                            label="Ver motivo"
+                            title="Pagamento expirado"
+                            tone="falha"
+                            lines={[
+                              'O prazo do QR do PIX passou sem o comprador pagar.',
+                              'Os números já voltaram a ficar livres.',
+                              rowCharge?.expiresAt
+                                ? `Venceu em ${new Date(rowCharge.expiresAt).toLocaleString('pt-BR')}`
+                                : null,
                             ]}
                           />
                         </div>
@@ -3005,14 +3070,32 @@ export default function LocalApp() {
             </div>
             <div className="hero-metrics report-metrics">
               <article className="metric">
-                <span>Esperado</span>
+                <span>Esperado (a vender)</span>
                 <strong>{brl(reportGlobals.esperado)}</strong>
-                <em>total das rifas menos o já vendido</em>
+                <em>
+                  {reportGlobals.aVenderQtd} nº a vender ·{' '}
+                  {pct(reportGlobals.aVenderQtd, reportGlobals.totalNumeros)} de{' '}
+                  {reportGlobals.totalNumeros} nº
+                </em>
+              </article>
+              <article className="metric">
+                <span>Vendido</span>
+                <strong>{brl(reportGlobals.vendidoValor)}</strong>
+                <em>
+                  {reportGlobals.vendidosQtd} nº vendidos ·{' '}
+                  {pct(reportGlobals.vendidosQtd, reportGlobals.totalNumeros)} de{' '}
+                  {reportGlobals.totalNumeros} nº
+                </em>
               </article>
               <article className="metric">
                 <span>Recebido</span>
                 <strong>{brl(reportGlobals.recebido)}</strong>
                 <em>PIX pago + dinheiro prestado</em>
+              </article>
+              <article className="metric">
+                <span>A receber</span>
+                <strong>{brl(reportGlobals.aReceber)}</strong>
+                <em>vendido que ainda não entrou</em>
               </article>
               <article className="metric">
                 <span>A prestar (equipe)</span>
@@ -3030,11 +3113,18 @@ export default function LocalApp() {
                 <em>recebido em dinheiro</em>
               </article>
               <article className="metric">
-                <span>Números vendidos</span>
-                <strong>{reportGlobals.vendidosQtd}</strong>
+                <span>Cancelados por membro</span>
+                <strong>{reportGlobals.cancMembro.qtd}</strong>
                 <em>
-                  de {reportGlobals.totalNumeros} nº ·{' '}
-                  {pct(reportGlobals.vendidosQtd, reportGlobals.totalNumeros)}
+                  {reportGlobals.cancMembro.numeros} nº liberados ·{' '}
+                  {brl(reportGlobals.cancMembro.valor)}
+                </em>
+              </article>
+              <article className="metric">
+                <span>Cancelados por tempo</span>
+                <strong>{reportGlobals.cancTempo.qtd}</strong>
+                <em>
+                  {reportGlobals.cancTempo.numeros} nº liberados · {brl(reportGlobals.cancTempo.valor)}
                 </em>
               </article>
             </div>
@@ -3070,6 +3160,13 @@ export default function LocalApp() {
                             {r.saleCount} vendas · {r.soldCount} nº · {bs.blocks} blocos
                             {bs.openNumbers > 0 ? ` · ${bs.openNumbers} abertos` : ''}
                           </span>
+                          {r.cancMembro + r.cancTempo > 0 ? (
+                            <span className="hint cancel-tally">
+                              {r.cancMembro > 0 ? `${r.cancMembro} cancelada(s) pelo membro` : ''}
+                              {r.cancMembro > 0 && r.cancTempo > 0 ? ' · ' : ''}
+                              {r.cancTempo > 0 ? `${r.cancTempo} expirada(s) por tempo` : ''}
+                            </span>
+                          ) : null}
                         </div>
                         <div className="member-report-kpis">
                           <span>

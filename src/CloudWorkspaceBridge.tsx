@@ -33,10 +33,8 @@ type SyncStatus = 'sincronizado' | 'salvando' | 'baixando' | 'offline'
 
 const PUSH_DEBOUNCE_MS = 200
 const PULL_INTERVAL_MS = 1200
-/** Em contingência (sem rede): tenta de novo a cada 30s, sem piscar a tela. */
+/** Em contingência (sem rede): testa a nuvem a cada 30s e sobe sozinho se voltou. */
 const CONTINGENCY_RETRY_MS = 30_000
-/** App em segundo plano: testa a rede a cada 1 min e sincroniza sozinho. */
-const BACKGROUND_RETRY_MS = 60_000
 /** Sem resposta da nuvem: derruba a chamada para o app não ficar preso em "salvando". */
 const NET_TIMEOUT_MS = 15_000
 /** Tempo máximo que um cadeado de sync pode ficar preso antes de ser liberado à força. */
@@ -181,9 +179,15 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
     }
   }
 
-  const pushNow = async () => {
+  const pushNow = async (opts?: { force?: boolean }) => {
     const session = sessionRef.current || loadCloudSession()
-    if (!session || savingRef.current || applyingRemoteRef.current) return
+    if (!session) return
+    if (opts?.force) {
+      savingRef.current = false
+      applyingRemoteRef.current = false
+      pullingRef.current = false
+    }
+    if (savingRef.current || applyingRemoteRef.current) return
     savingRef.current = true
     savingSinceRef.current = Date.now()
     dirtyRef.current = false
@@ -380,12 +384,45 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
     quietRetryRef.current = quiet
     clearStuckLocks()
     try {
-      if (dirtyRef.current) await pushNow()
-      await pullNow(true)
+      dirtyRef.current = true
+      await pushNow({ force: true })
+      if (syncStatusRef.current !== 'offline') await pullNow(true)
     } finally {
       quietRetryRef.current = false
     }
   }
+
+  const watchNetwork = async () => {
+    const session = sessionRef.current || loadCloudSession()
+    if (!session?.workspace.accessCode) return
+    try {
+      await withTimeout(peekWorkspaceUpdatedAt(session.workspace.accessCode), 'ping', 4_000)
+    } catch {
+      if (syncStatusRef.current !== 'offline') {
+        setStatus('offline')
+        setSyncError('Sem internet neste aparelho.')
+      }
+      return
+    }
+    const needPush = dirtyRef.current || syncStatusRef.current === 'offline'
+    if (!needPush) return
+    quietRetryRef.current = true
+    try {
+      clearStuckLocks()
+      dirtyRef.current = true
+      await pushNow({ force: true })
+      if (syncStatusRef.current !== 'offline') await pullNow(true)
+    } finally {
+      quietRetryRef.current = false
+    }
+  }
+
+  const watchNetworkRef = useRef(watchNetwork)
+  watchNetworkRef.current = watchNetwork
+  const reconnectNowRef = useRef(reconnectNow)
+  reconnectNowRef.current = reconnectNow
+  const pullNowRef = useRef(pullNow)
+  pullNowRef.current = pullNow
 
   useEffect(() => {
     let alive = true
@@ -578,56 +615,45 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
     return () => window.removeEventListener('rifa-cloud-session', onSession)
   }, [boot])
 
-  // Pull periódico: 1,2s online; 30s em contingência; 1 min em segundo plano
+  // Pull rápido só com nuvem ok; teste de rede a cada 30s (iOS não dispara "online")
   useEffect(() => {
     if (boot) return
-    let timer = 0
-    const delayNow = () => {
-      if (document.visibilityState !== 'visible') return BACKGROUND_RETRY_MS
-      if (syncStatusRef.current === 'offline' || !navigator.onLine) return CONTINGENCY_RETRY_MS
-      return PULL_INTERVAL_MS
-    }
-    const tick = () => {
-      const offline = syncStatusRef.current === 'offline' || !navigator.onLine
-      const hidden = document.visibilityState !== 'visible'
-      if (offline || hidden) {
-        void reconnectNow(true)
-      } else {
-        void pullNow(false)
-      }
-      timer = window.setTimeout(tick, delayNow())
-    }
-    timer = window.setTimeout(tick, delayNow())
-    const onFocus = () => {
-      void reconnectNow(syncStatusRef.current === 'offline')
-    }
+    const livePull = window.setInterval(() => {
+      if (syncStatusRef.current === 'offline' || !navigator.onLine) return
+      void pullNowRef.current(false)
+    }, PULL_INTERVAL_MS)
+    const netWatch = window.setInterval(() => {
+      void watchNetworkRef.current()
+    }, CONTINGENCY_RETRY_MS)
+    const kick = () => void watchNetworkRef.current()
     const onOnline = () => {
-      window.clearTimeout(timer)
-      timer = window.setTimeout(tick, 400)
+      dirtyRef.current = true
+      void reconnectNowRef.current(true)
     }
     const onOffline = () => {
       setStatus('offline')
       setSyncError('Sem internet neste aparelho.')
-      window.clearTimeout(timer)
-      timer = window.setTimeout(tick, CONTINGENCY_RETRY_MS)
     }
     const onVisibility = () => {
-      if (document.visibilityState === 'visible') {
-        void reconnectNow(syncStatusRef.current === 'offline')
-      }
+      if (document.visibilityState === 'visible') kick()
     }
-    window.addEventListener('focus', onFocus)
+    const onPageShow = () => kick()
+    window.addEventListener('focus', kick)
     window.addEventListener('online', onOnline)
     window.addEventListener('offline', onOffline)
+    window.addEventListener('pageshow', onPageShow)
     document.addEventListener('visibilitychange', onVisibility)
+    const first = window.setTimeout(kick, 2_000)
     return () => {
-      window.clearTimeout(timer)
-      window.removeEventListener('focus', onFocus)
+      window.clearInterval(livePull)
+      window.clearInterval(netWatch)
+      window.clearTimeout(first)
+      window.removeEventListener('focus', kick)
       window.removeEventListener('online', onOnline)
       window.removeEventListener('offline', onOffline)
+      window.removeEventListener('pageshow', onPageShow)
       document.removeEventListener('visibilitychange', onVisibility)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [boot])
 
   // Broadcast entre todos os aparelhos do mesmo código + realtime ADM

@@ -18,7 +18,7 @@ import {
   type CloudSession,
 } from './lib/workspace'
 import { offloadEmbeddedProofs } from './lib/proofs'
-import { formatErr, isNetworkError, translateAuthErr } from './lib/errors'
+import { pingNetwork } from './lib/netPing'
 import { clearPendingSalesPresentIn, useStore } from './store'
 import type { AppState } from './types'
 
@@ -116,6 +116,7 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
   const channelRef = useRef<ReturnType<NonNullable<typeof supabase>['channel']> | null>(null)
   const syncStatusRef = useRef<SyncStatus>('baixando')
   const quietRetryRef = useRef(false)
+  const [pingIn, setPingIn] = useState(30)
 
   const setStatus = (next: SyncStatus) => {
     syncStatusRef.current = next
@@ -379,39 +380,81 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
     }
   }
 
+  /** Mesmo caminho de fechar e abrir o app: baixa, mescla vendas locais e sobe. */
+  const recoverLikeReopen = async () => {
+    const session = sessionRef.current || loadCloudSession()
+    if (!session?.workspace.accessCode) throw new Error('Sessão ausente')
+    clearStuckLocks()
+    savingRef.current = false
+    pullingRef.current = false
+    applyingRemoteRef.current = false
+    const local = snapshotFromStore()
+    const opened = await withTimeout(
+      session.role === 'admin' && session.workspace.id
+        ? fetchOwnerWorkspace(session.workspace.id, session.workspace.accessCode)
+        : fetchByAccessCode(session.workspace.accessCode),
+      'ler o workspace',
+      12_000,
+    )
+    const merged = mergeContingencyState(opened.state, local)
+    applyingRemoteRef.current = true
+    useStore.getState().importSnapshot(merged)
+    applyingRemoteRef.current = false
+    const toSave = snapshotFromStore()
+    const updatedAt = await withTimeout(
+      session.role === 'admin' && session.workspace.id
+        ? saveOwnerWorkspaceState(session.workspace.id, toSave, session.workspace.accessCode)
+        : saveByAccessCode(session.workspace.accessCode, toSave, opened.meta.updatedAt),
+      'salvar',
+      12_000,
+    )
+    updatedAtRef.current = updatedAt
+    session.workspace.updatedAt = updatedAt
+    saveCloudSession(session)
+    sessionRef.current = session
+    clearPendingSalesPresentIn(toSave.sales)
+    setStatus('sincronizado')
+    setSyncError(null)
+    skipPullUntilRef.current = Date.now() + 350
+    void broadcastUpdated(updatedAt)
+  }
+
   /** Rede de volta (ou app em foco): sobe o pendente e baixa, sem recarregar a página. */
   const reconnectNow = async (quiet = false) => {
     quietRetryRef.current = quiet
     clearStuckLocks()
     try {
       dirtyRef.current = true
-      await pushNow({ force: true })
-      if (syncStatusRef.current !== 'offline') await pullNow(true)
+      await recoverLikeReopen()
+    } catch {
+      try {
+        await pushNow({ force: true })
+      } catch {
+        /* fica offline */
+      }
     } finally {
       quietRetryRef.current = false
     }
   }
 
   const watchNetwork = async () => {
-    const session = sessionRef.current || loadCloudSession()
-    if (!session?.workspace.accessCode) return
-    try {
-      await withTimeout(peekWorkspaceUpdatedAt(session.workspace.accessCode), 'ping', 4_000)
-    } catch {
+    const up = await pingNetwork()
+    if (!up) {
       if (syncStatusRef.current !== 'offline') {
         setStatus('offline')
         setSyncError('Sem internet neste aparelho.')
       }
       return
     }
-    const needPush = dirtyRef.current || syncStatusRef.current === 'offline'
-    if (!needPush) return
+    if (syncStatusRef.current !== 'offline' && !dirtyRef.current) return
     quietRetryRef.current = true
     try {
-      clearStuckLocks()
       dirtyRef.current = true
-      await pushNow({ force: true })
-      if (syncStatusRef.current !== 'offline') await pullNow(true)
+      await recoverLikeReopen()
+    } catch (err) {
+      console.warn('Ping ok, mas o sync ainda falhou', err)
+      setStatus('offline')
+      setSyncError(formatErr(err, 'Rede voltou, mas o envio falhou. Tente de novo.'))
     } finally {
       quietRetryRef.current = false
     }
@@ -615,20 +658,61 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
     return () => window.removeEventListener('rifa-cloud-session', onSession)
   }, [boot])
 
-  // Pull rápido só com nuvem ok; teste de rede a cada 30s (iOS não dispara "online")
+  // Pull rápido com nuvem ok. Ping de 30s via requestAnimationFrame (o timer do iPhone congela).
   useEffect(() => {
     if (boot) return
     const livePull = window.setInterval(() => {
-      if (syncStatusRef.current === 'offline' || !navigator.onLine) return
+      if (syncStatusRef.current === 'offline') return
       void pullNowRef.current(false)
     }, PULL_INTERVAL_MS)
-    const netWatch = window.setInterval(() => {
-      void watchNetworkRef.current()
-    }, CONTINGENCY_RETRY_MS)
-    const kick = () => void watchNetworkRef.current()
+
+    let lastBeat = Date.now()
+    let busy = false
+    let raf = 0
+    let shown = 30
+    const loop = () => {
+      raf = requestAnimationFrame(loop)
+      const elapsed = Date.now() - lastBeat
+      const left = Math.max(0, Math.ceil((CONTINGENCY_RETRY_MS - elapsed) / 1000))
+      if (left !== shown) {
+        shown = left
+        setPingIn(left)
+      }
+      if (elapsed < CONTINGENCY_RETRY_MS) return
+      lastBeat = Date.now()
+      if (busy) return
+      busy = true
+      void watchNetworkRef.current().finally(() => {
+        busy = false
+      })
+    }
+    raf = requestAnimationFrame(loop)
+
+    let worker: Worker | null = null
+    try {
+      const blob = new Blob(
+        [`setInterval(function(){postMessage('tick')},${CONTINGENCY_RETRY_MS})`],
+        { type: 'text/javascript' },
+      )
+      worker = new Worker(URL.createObjectURL(blob))
+      worker.onmessage = () => {
+        lastBeat = Date.now()
+        if (busy) return
+        busy = true
+        void watchNetworkRef.current().finally(() => {
+          busy = false
+        })
+      }
+    } catch {
+      /* Safari antigo — o rAF cobre */
+    }
+
+    const kick = () => {
+      lastBeat = Date.now() - CONTINGENCY_RETRY_MS
+    }
     const onOnline = () => {
       dirtyRef.current = true
-      void reconnectNowRef.current(true)
+      lastBeat = Date.now() - CONTINGENCY_RETRY_MS
     }
     const onOffline = () => {
       setStatus('offline')
@@ -637,21 +721,20 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
     const onVisibility = () => {
       if (document.visibilityState === 'visible') kick()
     }
-    const onPageShow = () => kick()
     window.addEventListener('focus', kick)
     window.addEventListener('online', onOnline)
     window.addEventListener('offline', onOffline)
-    window.addEventListener('pageshow', onPageShow)
+    window.addEventListener('pageshow', kick)
     document.addEventListener('visibilitychange', onVisibility)
-    const first = window.setTimeout(kick, 2_000)
+
     return () => {
       window.clearInterval(livePull)
-      window.clearInterval(netWatch)
-      window.clearTimeout(first)
+      cancelAnimationFrame(raf)
+      worker?.terminate()
       window.removeEventListener('focus', kick)
       window.removeEventListener('online', onOnline)
       window.removeEventListener('offline', onOffline)
-      window.removeEventListener('pageshow', onPageShow)
+      window.removeEventListener('pageshow', kick)
       document.removeEventListener('visibilitychange', onVisibility)
     }
   }, [boot])
@@ -743,7 +826,7 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
       : syncStatus === 'baixando'
         ? 'Atualizando…'
         : syncStatus === 'offline'
-          ? 'Contingência'
+          ? `Contingência · ping ${pingIn}s`
           : 'Nuvem ok'
 
   return (

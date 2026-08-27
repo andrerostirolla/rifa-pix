@@ -46,6 +46,8 @@ export const supabaseConfigError: string | null = (() => {
   return null
 })()
 
+export const supabaseUrl = url
+
 export const isSupabaseConfigured = Boolean(url && anon && !String(import.meta.env.VITE_SUPABASE_URL || '').includes('YOUR_'))
 
 export const supabase: SupabaseClient | null =

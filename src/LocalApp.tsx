@@ -360,14 +360,15 @@ export default function LocalApp() {
     let comVendedores = 0
     let pixAberto = 0
     for (const s of activeSales) {
-      const naLoja = s.paymentMethod === 'pix' && s.pixDestination === 'entidade'
-      if (naLoja) {
+      if (s.paymentMethod === 'pix' && (s.pixDestination || 'entidade') === 'entidade') {
         emConta += s.paidAmount
         pixAberto += Math.max(0, s.totalAmount - s.paidAmount)
-      } else if (s.cashSettledAt) {
-        emConta += s.totalAmount
-      } else {
-        comVendedores += s.totalAmount
+      } else if (s.paymentMethod === 'dinheiro') {
+        if ((s.cashDestination || 'vendedor') === 'loja' || s.cashSettledAt) {
+          emConta += s.totalAmount
+        } else {
+          comVendedores += s.totalAmount
+        }
       }
     }
 
@@ -623,15 +624,20 @@ export default function LocalApp() {
     const vendidoValor = scoped.reduce((a, s) => a + s.totalAmount, 0)
     const pixSales = scoped.filter((s) => s.paymentMethod === 'pix')
     const cashSales = scoped.filter((s) => s.paymentMethod === 'dinheiro')
-    const pixRecebido = pixSales
-      .filter((s) => (s.pixDestination || 'entidade') === 'entidade')
-      .reduce((a, s) => a + s.paidAmount, 0)
+    const pixPago = pixSales.filter(
+      (s) =>
+        (s.pixDestination || 'entidade') === 'entidade' &&
+        (s.status === 'quitado' || (s.paidAmount || 0) > 0),
+    )
+    const pixRecebido = pixPago.reduce((a, s) => a + (s.paidAmount || s.totalAmount), 0)
+    const pixNumeros = pixPago.reduce((a, s) => a + s.numbers.length, 0)
     const dinheiroRecebido = cashSales.reduce((a, s) => a + s.totalAmount, 0)
-    const pixNumeros = pixSales.reduce((a, s) => a + s.numbers.length, 0)
     const dinheiroNumeros = cashSales.reduce((a, s) => a + s.numbers.length, 0)
-    const recebido =
-      pixRecebido + cashSales.filter((s) => Boolean(s.cashSettledAt)).reduce((a, s) => a + s.totalAmount, 0)
-    const aPrestar = cashSales.filter((s) => !s.cashSettledAt).reduce((a, s) => a + s.totalAmount, 0)
+    const cashNaEntidade = cashSales.filter(
+      (s) => (s.cashDestination || 'vendedor') === 'loja' || Boolean(s.cashSettledAt),
+    )
+    const recebido = pixRecebido + cashNaEntidade.reduce((a, s) => a + s.totalAmount, 0)
+    const aPrestar = cashSales.filter((s) => isCashPending(s)).reduce((a, s) => a + s.totalAmount, 0)
 
     const eventNames = new Set(escolhidos.flatMap((r) => [r.eventName, r.name].filter(Boolean)))
     const contingenciaSaleIds = new Set(
@@ -680,10 +686,10 @@ export default function LocalApp() {
       esperado: aVenderValor,
       aVenderQtd: Math.max(0, totalNumeros - vendidosQtd),
       vendidoValor,
-      recebido,
+      recebido: Math.round(recebido * 100) / 100,
       aPrestar: Math.round(aPrestar * 100) / 100,
-      pixRecebido,
-      dinheiroRecebido,
+      pixRecebido: Math.round(pixRecebido * 100) / 100,
+      dinheiroRecebido: Math.round(dinheiroRecebido * 100) / 100,
       pixNumeros,
       dinheiroNumeros,
       contingenciaNumeros,
@@ -3343,7 +3349,7 @@ export default function LocalApp() {
               </div>
               <div className="metric-group metric-group--canal">
                 <article className="metric">
-                  <span>Números em contingência</span>
+                  <span>Números vendidos em contingência</span>
                   <strong>{reportGlobals.contingenciaNumeros}</strong>
                   <em>
                     {reportGlobals.contingenciaNumeros} nº vendidos sem rede ·{' '}

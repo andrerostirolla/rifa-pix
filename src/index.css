@@ -396,6 +396,12 @@ tbody tr.sale-cancelled:hover > td {
   grid-area: membros;
 }
 
+.summary-solo--membros strong {
+  font-weight: 800;
+  font-size: clamp(1.55rem, 3vw, 2rem);
+  letter-spacing: -0.03em;
+}
+
 .summary-group--vendas {
   grid-area: vendas;
 }
@@ -422,6 +428,33 @@ tbody tr.sale-cancelled:hover > td {
 
 .summary-solo--ticket {
   grid-area: ticket;
+  justify-content: center;
+  text-align: center;
+  background: linear-gradient(180deg, #e3f7fb 0%, #d0eef6 100%);
+  border-color: #6eb8c8;
+  box-shadow: 0 10px 28px rgba(14, 116, 144, 0.14);
+}
+
+.summary-solo--ticket span {
+  font-weight: 800;
+  color: #0b5d6e;
+}
+
+.summary-solo--ticket strong {
+  font-size: clamp(1.55rem, 3.4vw, 2.05rem);
+  font-family: 'Fraunces', Georgia, serif;
+  font-weight: 800;
+  color: #0b5d6e;
+  letter-spacing: -0.03em;
+}
+
+.ticket-lider {
+  display: block;
+  margin-top: 0.25rem;
+  font-size: clamp(0.92rem, 2vw, 1.08rem);
+  font-weight: 800;
+  color: #0b5d6e;
+  line-height: 1.25;
 }
 
 .summary-group {
@@ -441,26 +474,31 @@ tbody tr.sale-cancelled:hover > td {
 
 .summary-group--caixa {
   grid-template-columns: 1fr 1fr;
-  background: rgba(183, 110, 0, 0.12);
-  border-color: rgba(183, 110, 0, 0.22);
+  background: rgba(15, 122, 95, 0.07);
+  border-color: rgba(15, 122, 95, 0.12);
 }
 
 .summary-group--equipe {
   grid-template-columns: 1fr 1fr;
-  background: rgba(124, 92, 176, 0.12);
-  border-color: rgba(124, 92, 176, 0.22);
+  background: rgba(140, 110, 180, 0.08);
+  border-color: rgba(140, 110, 180, 0.14);
 }
 
 .summary-group--numeros {
   grid-template-columns: 1fr 1fr;
-  background: rgba(47, 110, 170, 0.12);
-  border-color: rgba(47, 110, 170, 0.22);
+  background: rgba(220, 130, 50, 0.08);
+  border-color: rgba(220, 130, 50, 0.14);
 }
 
 .summary-group--compradores {
   grid-template-columns: 1fr 1fr;
-  background: rgba(15, 122, 95, 0.1);
-  border-color: rgba(15, 122, 95, 0.2);
+  background: rgba(220, 190, 40, 0.09);
+  border-color: rgba(210, 175, 30, 0.16);
+}
+
+.summary-group .summary-card {
+  background: rgba(255, 255, 255, 0.82);
+  border-color: rgba(20, 32, 28, 0.08);
 }
 
 .summary-card {
@@ -542,7 +580,24 @@ tbody tr.sale-cancelled:hover > td {
 .summary-solo--prazo {
   justify-content: center;
   text-align: center;
-  box-shadow: 0 10px 28px rgba(20, 32, 28, 0.1);
+  box-shadow: 0 10px 28px rgba(180, 35, 24, 0.12);
+  background: #fdecea;
+  border-color: #e8b4ae;
+}
+
+.summary-solo--prazo.prazo-tranquilo,
+.summary-solo--prazo.prazo-atencao,
+.summary-solo--prazo.prazo-urgente {
+  background: #fdecea;
+  border-color: #e8b4ae;
+}
+
+.summary-solo--prazo span,
+.summary-solo--prazo strong,
+.summary-solo--prazo .prazo-data,
+.summary-solo--prazo.prazo-urgente strong {
+  color: #b42318;
+  font-weight: 800;
 }
 
 .summary-solo--prazo strong {

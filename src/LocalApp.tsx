@@ -1946,7 +1946,6 @@ export default function LocalApp() {
             <article className="summary-card summary-solo summary-solo--membros">
               <span>Membros cadastrados</span>
               <strong>{members.length}</strong>
-              <em>{resumo.maisVendeu ? `${resumo.maisVendeu.name} lidera as vendas` : 'sem vendas ainda'}</em>
             </article>
             <div className="summary-group summary-group--vendas">
               <article className="summary-card pink-1">
@@ -1999,14 +1998,14 @@ export default function LocalApp() {
               )}
             </article>
             <div className="summary-group summary-group--caixa">
-              <article className="summary-card ok">
+              <article className="summary-card">
                 <span>Valores em conta</span>
                 <strong>
                   {brl(resumo.emConta)} <small>{pct(resumo.emConta, resumo.total.valor)}</small>
                 </strong>
                 <em>do vendido · PIX da loja + dinheiro já prestado</em>
               </article>
-              <article className="summary-card receber">
+              <article className="summary-card">
                 <span>Valores a receber</span>
                 <strong>
                   {brl(resumo.aReceber)} <small>{pct(resumo.aReceber, resumo.total.valor)}</small>
@@ -2017,7 +2016,7 @@ export default function LocalApp() {
               </article>
             </div>
             <div className="summary-group summary-group--equipe">
-              <article className="summary-card roxo">
+              <article className="summary-card">
                 <span>Membro que mais vendeu</span>
                 <strong>{resumo.maisVendeu?.name || '—'}</strong>
                 <em>
@@ -2026,7 +2025,7 @@ export default function LocalApp() {
                     : 'sem vendas'}
                 </em>
               </article>
-              <article className="summary-card amarelo">
+              <article className="summary-card">
                 <span>Membro que menos vendeu</span>
                 <strong>{resumo.menosVendeu?.name || '—'}</strong>
                 <em>
@@ -2037,14 +2036,14 @@ export default function LocalApp() {
               </article>
             </div>
             <div className="summary-group summary-group--numeros">
-              <article className="summary-card azul">
+              <article className="summary-card">
                 <span>Números vendidos</span>
                 <strong>
                   {resumo.vendidosQtd} <small>{pct(resumo.vendidosQtd, resumo.totalNumeros)}</small>
                 </strong>
                 <em>{brl(resumo.vendidosValor)} do total de {resumo.totalNumeros} nº</em>
               </article>
-              <article className="summary-card vermelho-medio">
+              <article className="summary-card">
                 <span>Números a vender</span>
                 <strong>
                   {resumo.restanteQtd} <small>{pct(resumo.restanteQtd, resumo.totalNumeros)}</small>
@@ -2053,7 +2052,7 @@ export default function LocalApp() {
               </article>
             </div>
             <div className="summary-group summary-group--compradores">
-              <article className="summary-card teal-1">
+              <article className="summary-card">
                 <span>Maior comprador</span>
                 <strong>{resumo.maiorComprador?.name || '—'}</strong>
                 <em>
@@ -2062,7 +2061,7 @@ export default function LocalApp() {
                     : 'sem compradores'}
                 </em>
               </article>
-              <article className="summary-card teal-2">
+              <article className="summary-card">
                 <span>Menor comprador</span>
                 <strong>{resumo.menorComprador?.name || '—'}</strong>
                 <em>
@@ -2075,11 +2074,13 @@ export default function LocalApp() {
             <article className="summary-card summary-solo summary-solo--ticket">
               <span>Ticket médio geral</span>
               <strong>{brl(resumo.ticketMedio)}</strong>
-              <em>
-                {resumo.melhorTicket
-                  ? `${resumo.melhorTicket.name} · ${brl(resumo.melhorTicket.ticket)}`
-                  : 'por venda registrada'}
-              </em>
+              {resumo.melhorTicket ? (
+                <b className="ticket-lider">
+                  {resumo.melhorTicket.name} · {brl(resumo.melhorTicket.ticket)}
+                </b>
+              ) : (
+                <em>por venda registrada</em>
+              )}
             </article>
           </div>
           {suggestions.length > 0 && <h3>Sugestões TXID</h3>}

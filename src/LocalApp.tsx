@@ -631,11 +631,12 @@ export default function LocalApp() {
     )
     const pixRecebido = pixPago.reduce((a, s) => a + (s.paidAmount || s.totalAmount), 0)
     const pixNumeros = pixPago.reduce((a, s) => a + s.numbers.length, 0)
-    const dinheiroRecebido = cashSales.reduce((a, s) => a + s.totalAmount, 0)
-    const dinheiroNumeros = cashSales.reduce((a, s) => a + s.numbers.length, 0)
     const cashNaEntidade = cashSales.filter(
       (s) => (s.cashDestination || 'vendedor') === 'loja' || Boolean(s.cashSettledAt),
     )
+    const cashPrestado = cashSales.filter((s) => Boolean(s.cashSettledAt))
+    const dinheiroRecebido = cashPrestado.reduce((a, s) => a + s.totalAmount, 0)
+    const dinheiroNumeros = cashPrestado.reduce((a, s) => a + s.numbers.length, 0)
     const recebido = pixRecebido + cashNaEntidade.reduce((a, s) => a + s.totalAmount, 0)
     const aPrestar = cashSales.filter((s) => isCashPending(s)).reduce((a, s) => a + s.totalAmount, 0)
 
@@ -3341,7 +3342,7 @@ export default function LocalApp() {
                   <span>Recebido em dinheiro</span>
                   <strong>{brl(reportGlobals.dinheiroRecebido)}</strong>
                   <em>
-                    {reportGlobals.dinheiroNumeros} nº em dinheiro ·{' '}
+                    {reportGlobals.dinheiroNumeros} nº já prestados ·{' '}
                     {pct(reportGlobals.dinheiroNumeros, reportGlobals.totalNumeros)} de{' '}
                     {reportGlobals.totalNumeros} nº
                   </em>

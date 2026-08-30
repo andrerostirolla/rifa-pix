@@ -346,6 +346,29 @@ export default function LocalApp() {
     return sales.filter((s) => s.memberId === memberId)
   }, [isAdmin, sales, memberId])
 
+  const memberHomeBriefs = useMemo(() => {
+    const last5 = [...visibleSales].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 5)
+    const pixReview = visibleSales
+      .filter((s) => {
+        if (s.paymentMethod !== 'pix') return false
+        const charge = pixCharges.find((c) => c.saleId === s.id)
+        const waiting = !s.cancelledAt && s.status === 'pendente' && !isPixChargeExpired(charge)
+        const expired =
+          s.cancelReason === 'expirado' ||
+          (!s.cancelledAt && s.status === 'pendente' && isPixChargeExpired(charge))
+        return waiting || expired
+      })
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, 8)
+    const cashDue = visibleSales.filter(isCashPending)
+    return {
+      last5,
+      pixReview,
+      cashDue,
+      cashTotal: cashDue.reduce((sum, s) => sum + s.totalAmount, 0),
+    }
+  }, [visibleSales, pixCharges])
+
   /** Vendas que valem dinheiro — canceladas ficam só no histórico da lista. */
   const activeSales = useMemo(() => sales.filter((s) => !s.cancelledAt), [sales])
 
@@ -1738,6 +1761,99 @@ export default function LocalApp() {
       )}
 
       {/* MEMBER VIEW */}
+      {!isAdmin && memberTab === 'blocos' && !openBlock && (
+        <div className="member-briefs">
+          <section className="member-brief">
+            <div className="member-brief-head">
+              <h3>Últimas vendas</h3>
+              <button type="button" className="btn btn-ghost btn-mini" onClick={() => setMemberTab('vendas')}>
+                Ver todas
+              </button>
+            </div>
+            {memberHomeBriefs.last5.length === 0 ? (
+              <p>Nenhuma venda ainda.</p>
+            ) : (
+              <ul>
+                {memberHomeBriefs.last5.map((s) => (
+                  <li key={s.id}>
+                    <button type="button" className="member-brief-row" onClick={() => setMemberTab('vendas')}>
+                      <b>{s.buyerName}</b>
+                      <span>
+                        {s.cancelledAt ? 'Cancelada · ' : ''}
+                        {s.paymentMethod === 'pix' ? 'PIX' : 'Dinheiro'} · {brl(s.totalAmount)}
+                      </span>
+                      <small>
+                        {formatNumbers(s.numbers)} · {new Date(s.createdAt).toLocaleDateString('pt-BR')}
+                      </small>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+          <section className="member-brief member-brief-pix">
+            <h3>PIX a revisar</h3>
+            <p className="member-brief-hint">
+              Aguardando pagamento ou cancelado por tempo — confira se o copia e cola foi enviado.
+            </p>
+            {memberHomeBriefs.pixReview.length === 0 ? (
+              <p>Nenhum PIX pendente ou expirado.</p>
+            ) : (
+              <ul>
+                {memberHomeBriefs.pixReview.map((s) => {
+                  const charge = pixCharges.find((c) => c.saleId === s.id)
+                  const expired = s.cancelReason === 'expirado' || isPixChargeExpired(charge)
+                  const waiting = !expired && !s.cancelledAt && s.status === 'pendente'
+                  const canReopen = waiting && Boolean(charge?.copyPaste || charge?.qrCode)
+                  return (
+                    <li key={s.id}>
+                      <b>{s.buyerName}</b>
+                      <span>
+                        {waiting ? 'Aguardando' : 'Expirado / tempo'} · {brl(s.totalAmount)}
+                      </span>
+                      <small>{formatNumbers(s.numbers)}</small>
+                      {waiting && (
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-mini"
+                          onClick={() => reopenPixCharge(s.id)}
+                          disabled={!canReopen}
+                        >
+                          Ver QR
+                        </button>
+                      )}
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+          </section>
+          <section className="member-brief member-brief-cash">
+            <h3>Dinheiro a prestar</h3>
+            <p className="member-brief-hint">Vendas em espécie ainda sem baixa da tesouraria.</p>
+            {memberHomeBriefs.cashDue.length === 0 ? (
+              <p>Nada a prestar no momento.</p>
+            ) : (
+              <>
+                <p className="member-brief-total">
+                  {memberHomeBriefs.cashDue.length} venda{memberHomeBriefs.cashDue.length === 1 ? '' : 's'} ·{' '}
+                  <b>{brl(memberHomeBriefs.cashTotal)}</b>
+                </p>
+                <ul>
+                  {memberHomeBriefs.cashDue.slice(0, 5).map((s) => (
+                    <li key={s.id}>
+                      <b>{s.buyerName}</b>
+                      <span>{brl(s.totalAmount)}</span>
+                      <small>{formatNumbers(s.numbers)}</small>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+          </section>
+        </div>
+      )}
+
       {!isAdmin && memberTab === 'blocos' && !openBlock && (
         <section className="panel">
           <div className="panel-head">

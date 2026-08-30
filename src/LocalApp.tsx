@@ -47,6 +47,13 @@ type AdminTab =
   | 'auditoria'
 type MemberTab = 'blocos' | 'vendas'
 
+type SensitiveOp =
+  | { type: 'liberar'; blockId: string; memberId: string }
+  | { type: 'removerMembro'; memberId: string }
+  | { type: 'removerEvento'; raffleId: string }
+  | { type: 'transferir'; toMemberId: string; blockIds: string[] }
+  | { type: 'atribuir'; memberId: string; blockIds: string[] }
+
 const statusLabel: Record<PaymentStatus, string> = {
   pendente: 'Pendente',
   parcial: 'Parcial',
@@ -246,6 +253,9 @@ export default function LocalApp() {
   const [wipeOpen, setWipeOpen] = useState(false)
   const [wipeBusy, setWipeBusy] = useState(false)
   const [wipeError, setWipeError] = useState<string | null>(null)
+  const [sensitiveOp, setSensitiveOp] = useState<SensitiveOp | null>(null)
+  const [sensitiveBusy, setSensitiveBusy] = useState(false)
+  const [sensitiveError, setSensitiveError] = useState<string | null>(null)
   const [auditQuery, setAuditQuery] = useState('')
   const [cancelAsk, setCancelAsk] = useState<{ saleId: string; fromModal: boolean } | null>(null)
   const [cancelBusy, setCancelBusy] = useState(false)
@@ -1223,6 +1233,174 @@ export default function LocalApp() {
       showToast('Dados limpos. O rastro de ações foi preservado.')
     } finally {
       setWipeBusy(false)
+    }
+  }
+
+  const closeSensitiveOp = () => {
+    setSensitiveOp(null)
+    setSensitiveError(null)
+    setSensitiveBusy(false)
+  }
+
+  const confirmSensitiveOp = async (adminPassword: string) => {
+    if (!sensitiveOp) return
+    setSensitiveBusy(true)
+    setSensitiveError(null)
+    try {
+      try {
+        await verifyAdminCredential(adminPassword)
+      } catch (err) {
+        setSensitiveError(formatErr(err, 'Senha do ADM inválida.'))
+        return
+      }
+
+      const autorizado = `ADM ${who}`
+
+      if (sensitiveOp.type === 'liberar') {
+        const block = blocks.find((b) => b.id === sensitiveOp.blockId)
+        const member = members.find((m) => m.id === sensitiveOp.memberId)
+        if (!block || !member) {
+          setSensitiveError('Bloco ou membro não encontrado.')
+          return
+        }
+        const bs = blockStats(block.id)
+        const result = unassignBlock(block.id)
+        if (!result.ok) {
+          setSensitiveError(result.error || 'Não foi possível liberar.')
+          return
+        }
+        logAudit('bloco.liberar', `${block.label} · de ${member.name}`, {
+          Bloco: `${block.label} (nº ${block.fromNumber}–${block.toNumber})`,
+          De: member.name,
+          Situação: `${bs.open} de ${bs.total} nº ainda abertos`,
+          Evento: raffles.find((r) => r.id === block.raffleId)?.eventName,
+          'Confirmado por': autorizado,
+        })
+        requestCloudPush()
+        showToast(`Bloco ${block.label} liberado.`)
+        closeSensitiveOp()
+        return
+      }
+
+      if (sensitiveOp.type === 'removerMembro') {
+        const member = members.find((m) => m.id === sensitiveOp.memberId)
+        if (!member) {
+          setSensitiveError('Membro não encontrado.')
+          return
+        }
+        const memberBlocks = blocks.filter((b) => b.memberId === member.id)
+        const st = memberBlockStats(member.id)
+        removeMember(member.id)
+        logAudit('membro.remover', member.name, {
+          Membro: member.name,
+          WhatsApp: member.phone || undefined,
+          'Blocos que tinha': memberBlocks.map((b) => b.label).join(', ') || 'nenhum',
+          'Números vendidos': `${st.soldNumbers}`,
+          'Confirmado por': autorizado,
+        })
+        requestCloudPush()
+        showToast(`Membro ${member.name} removido.`)
+        closeSensitiveOp()
+        return
+      }
+
+      if (sensitiveOp.type === 'removerEvento') {
+        const raffle = raffles.find((r) => r.id === sensitiveOp.raffleId)
+        if (!raffle) {
+          setSensitiveError('Evento não encontrado.')
+          return
+        }
+        const eventBlocks = blocks.filter((b) => b.raffleId === raffle.id)
+        removeRaffle(raffle.id)
+        logAudit('evento.remover', raffle.eventName, {
+          Evento: raffle.eventName,
+          Blocos: `${raffle.blockCount || eventBlocks.length}`,
+          'Total de números': `${raffle.totalNumbers}`,
+          'Vendas do evento': `${activeSales.filter((s) => s.raffleId === raffle.id).length}`,
+          'Confirmado por': autorizado,
+        })
+        setOpenEventId(null)
+        requestCloudPush()
+        showToast(`Evento ${raffle.eventName} removido.`)
+        closeSensitiveOp()
+        return
+      }
+
+      if (sensitiveOp.type === 'transferir') {
+        const toMember = members.find((m) => m.id === sensitiveOp.toMemberId)
+        if (!toMember) {
+          setSensitiveError('Membro de destino não encontrado.')
+          return
+        }
+        const movedBlocks = blocks.filter((b) => sensitiveOp.blockIds.includes(b.id))
+        let ok = 0
+        for (const blockId of sensitiveOp.blockIds) {
+          const result = transferBlock(blockId, toMember.id)
+          if (!result.ok) {
+            setSensitiveError(result.error || 'Erro ao transferir.')
+            return
+          }
+          ok += 1
+        }
+        const movedLabels = movedBlocks
+          .map((b) => `${b.label} (de ${members.find((m) => m.id === b.memberId)?.name || 'livre'})`)
+          .join(', ')
+        setTransferBlockIds([])
+        logAudit(
+          'bloco.transferir',
+          `${movedLabels || `${ok} bloco(s)`} → ${toMember.name}`,
+          {
+            Blocos: movedBlocks.map((b) => b.label).join(', '),
+            Quantidade: `${ok} bloco(s)`,
+            De: [
+              ...new Set(movedBlocks.map((b) => members.find((m) => m.id === b.memberId)?.name || 'livre')),
+            ].join(', '),
+            Para: toMember.name,
+            'Números abertos': `${movedBlocks.reduce((acc, b) => acc + blockStats(b.id).open, 0)}`,
+            'Confirmado por': autorizado,
+          },
+        )
+        requestCloudPush()
+        showToast(ok === 1 ? 'Transferência registrada.' : `${ok} transferências registradas.`)
+        closeSensitiveOp()
+        return
+      }
+
+      const toMember = members.find((m) => m.id === sensitiveOp.memberId)
+      if (!toMember) {
+        setSensitiveError('Membro não encontrado.')
+        return
+      }
+      let ok = 0
+      for (const blockId of sensitiveOp.blockIds) {
+        const result = assignBlock(blockId, toMember.id)
+        if (!result.ok) {
+          setSensitiveError(result.error || 'Erro ao atribuir.')
+          return
+        }
+        ok += 1
+      }
+      const assignedLabels = blocks
+        .filter((b) => sensitiveOp.blockIds.includes(b.id))
+        .map((b) => b.label)
+        .join(', ')
+      setAssignBlockIds([])
+      logAudit(
+        'bloco.atribuir',
+        `${assignedLabels || `${ok} bloco(s)`} → ${toMember.name}`,
+        {
+          Blocos: assignedLabels,
+          Quantidade: `${ok} bloco(s)`,
+          Para: toMember.name,
+          Evento: raffles.find((r) => r.id === (filterEventId || raffles[0]?.id))?.eventName,
+          'Confirmado por': autorizado,
+        },
+      )
+      requestCloudPush()
+      showToast(ok === 1 ? 'Bloco atribuído ao membro.' : `${ok} blocos atribuídos ao membro.`)
+      closeSensitiveOp()
+    } finally {
+      setSensitiveBusy(false)
     }
   }
 
@@ -2299,34 +2477,12 @@ export default function LocalApp() {
             className="panel"
             onSubmit={(e) => {
               e.preventDefault()
-              if (!askProceed()) return
               const fd = new FormData(e.currentTarget)
               const memberIdSel = String(fd.get('memberId') || '')
               if (!assignBlockIds.length) return showToast('Selecione ao menos um bloco.')
-              let ok = 0
-              for (const blockId of assignBlockIds) {
-                const result = assignBlock(blockId, memberIdSel)
-                if (!result.ok) return showToast(result.error || 'Erro')
-                ok += 1
-              }
-              const assignedLabels = blocks
-                .filter((b) => assignBlockIds.includes(b.id))
-                .map((b) => b.label)
-                .join(', ')
-              setAssignBlockIds([])
-              e.currentTarget.reset()
-              logAudit(
-                'bloco.atribuir',
-                `${assignedLabels || `${ok} bloco(s)`} → ${members.find((m) => m.id === memberIdSel)?.name || 'membro'}`,
-                {
-                  Blocos: assignedLabels,
-                  Quantidade: `${ok} bloco(s)`,
-                  Para: members.find((m) => m.id === memberIdSel)?.name,
-                  Evento: raffles.find((r) => r.id === (filterEventId || raffles[0]?.id))?.eventName,
-                },
-              )
-              showToast(ok === 1 ? 'Bloco atribuído ao membro.' : `${ok} blocos atribuídos ao membro.`)
-              requestCloudPush()
+              if (!memberIdSel) return showToast('Selecione o membro.')
+              setSensitiveError(null)
+              setSensitiveOp({ type: 'atribuir', memberId: memberIdSel, blockIds: [...assignBlockIds] })
             }}
           >
             <div className="panel-head">
@@ -2384,7 +2540,7 @@ export default function LocalApp() {
                           <span>
                             {b.fromNumber}–{b.toNumber} · {owner}
                           </span>
-                          <span>{soldOut ? 'Vendido' : assigned ? 'Indisponível' : `${st.open} abertos`}</span>
+                          <span>{soldOut ? '\u00a0' : assigned ? 'Indisponível' : `${st.open} abertos`}</span>
                           {soldOut ? <span className="vendido-stamp">VENDIDO!</span> : null}
                         </button>
                       )
@@ -2482,16 +2638,8 @@ export default function LocalApp() {
                                   type="button"
                                   className="btn btn-ghost"
                                   onClick={() => {
-                                    if (!askProceed()) return
-                                    const result = unassignBlock(b.id)
-                                    if (!result.ok) return showToast(result.error || 'Não foi possível liberar.')
-                                    logAudit('bloco.liberar', `${b.label} · de ${m.name}`, {
-                                      Bloco: `${b.label} (nº ${b.fromNumber}–${b.toNumber})`,
-                                      De: m.name,
-                                      Situação: `${bs.open} de ${bs.total} nº ainda abertos`,
-                                      Evento: raffles.find((r) => r.id === b.raffleId)?.eventName,
-                                    })
-                                    requestCloudPush()
+                                    setSensitiveError(null)
+                                    setSensitiveOp({ type: 'liberar', blockId: b.id, memberId: m.id })
                                   }}
                                 >
                                   liberar
@@ -2505,15 +2653,8 @@ export default function LocalApp() {
                       type="button"
                       className="btn btn-danger"
                       onClick={() => {
-                        if (!askProceed('Tem certeza que deseja remover este membro?')) return
-                        removeMember(m.id)
-                        logAudit('membro.remover', m.name, {
-                          Membro: m.name,
-                          WhatsApp: m.phone || undefined,
-                          'Blocos que tinha': memberBlocks.map((b) => b.label).join(', ') || 'nenhum',
-                          'Números vendidos': `${st.soldNumbers}`,
-                        })
-                        requestCloudPush()
+                        setSensitiveError(null)
+                        setSensitiveOp({ type: 'removerMembro', memberId: m.id })
                       }}
                     >
                       Remover membro
@@ -2532,39 +2673,12 @@ export default function LocalApp() {
             className="panel"
             onSubmit={(e) => {
               e.preventDefault()
-              if (!askProceed()) return
               const fd = new FormData(e.currentTarget)
               const toMember = String(fd.get('memberId') || '')
               if (!transferBlockIds.length) return showToast('Selecione ao menos um bloco.')
-              let ok = 0
-              for (const blockId of transferBlockIds) {
-                const result = transferBlock(blockId, toMember)
-                if (!result.ok) return showToast(result.error || 'Erro')
-                ok += 1
-              }
-              const movedBlocks = blocks.filter((b) => transferBlockIds.includes(b.id))
-              const movedLabels = movedBlocks
-                .map((b) => `${b.label} (de ${members.find((m) => m.id === b.memberId)?.name || 'livre'})`)
-                .join(', ')
-              setTransferBlockIds([])
-              e.currentTarget.reset()
-              showToast(ok === 1 ? 'Transferência registrada.' : `${ok} transferências registradas.`)
-              logAudit(
-                'bloco.transferir',
-                `${movedLabels || `${ok} bloco(s)`} → ${members.find((m) => m.id === toMember)?.name || 'membro'}`,
-                {
-                  Blocos: movedBlocks.map((b) => b.label).join(', '),
-                  Quantidade: `${ok} bloco(s)`,
-                  De: [
-                    ...new Set(
-                      movedBlocks.map((b) => members.find((m) => m.id === b.memberId)?.name || 'livre'),
-                    ),
-                  ].join(', '),
-                  Para: members.find((m) => m.id === toMember)?.name,
-                  'Números abertos': `${movedBlocks.reduce((acc, b) => acc + blockStats(b.id).open, 0)}`,
-                },
-              )
-              requestCloudPush()
+              if (!toMember) return showToast('Selecione o membro.')
+              setSensitiveError(null)
+              setSensitiveOp({ type: 'transferir', toMemberId: toMember, blockIds: [...transferBlockIds] })
             }}
           >
             <div className="panel-head">
@@ -2621,7 +2735,7 @@ export default function LocalApp() {
                           <span className="owner-assigned">
                             {b.fromNumber}–{b.toNumber} · {owner}
                           </span>
-                          <span>{soldOut ? 'Vendido' : `${st.open} abertos`}</span>
+                          <span>{soldOut ? '\u00a0' : `${st.open} abertos`}</span>
                           {soldOut ? <span className="vendido-stamp">VENDIDO!</span> : null}
                         </button>
                       )
@@ -2829,16 +2943,8 @@ export default function LocalApp() {
                       type="button"
                       className="btn btn-danger"
                       onClick={() => {
-                        if (!askProceed('Remover este evento e todos os blocos dele?')) return
-                        removeRaffle(r.id)
-                        logAudit('evento.remover', r.eventName, {
-                          Evento: r.eventName,
-                          Blocos: `${r.blockCount || eventBlocks.length}`,
-                          'Total de números': `${r.totalNumbers}`,
-                          'Vendas do evento': `${activeSales.filter((s) => s.raffleId === r.id).length}`,
-                        })
-                        setOpenEventId(null)
-                        requestCloudPush()
+                        setSensitiveError(null)
+                        setSensitiveOp({ type: 'removerEvento', raffleId: r.id })
                       }}
                     >
                       Remover evento
@@ -2882,7 +2988,7 @@ export default function LocalApp() {
                           <span className="hint">
                             nº {b.fromNumber}–{b.toNumber}
                           </span>
-                          <span className="block-open">{soldOut ? 'Vendido' : `${st.open} abertos`}</span>
+                          <span className="block-open">{soldOut ? '\u00a0' : `${st.open} abertos`}</span>
                           <span className={owner ? 'owner-assigned' : 'owner-free'}>{owner || 'livre'}</span>
                           {soldOut ? <span className="vendido-stamp">VENDIDO!</span> : null}
                         </div>
@@ -4029,6 +4135,40 @@ export default function LocalApp() {
             )
           })()}
         </section>
+      )}
+
+      {sensitiveOp && (
+        <AdminConfirmModal
+          title={
+            sensitiveOp.type === 'liberar'
+              ? 'Liberar bloco'
+              : sensitiveOp.type === 'removerMembro'
+                ? 'Remover membro'
+                : sensitiveOp.type === 'removerEvento'
+                  ? 'Remover evento'
+                  : sensitiveOp.type === 'transferir'
+                    ? 'Transferir bloco'
+                    : 'Atribuir bloco'
+          }
+          description={
+            sensitiveOp.type === 'liberar'
+              ? 'Só o ADM confirma com a senha. O bloco volta a ficar livre e o rastro fica na Auditoria.'
+              : sensitiveOp.type === 'removerMembro'
+                ? 'Só o ADM pode remover membro. Blocos já vendidos continuam travados.'
+                : sensitiveOp.type === 'removerEvento'
+                  ? 'Remove o evento e os blocos dele. Só o ADM confirma com a senha.'
+                  : sensitiveOp.type === 'transferir'
+                    ? 'Transfere o(s) bloco(s) entre membros. Só o ADM confirma com a senha.'
+                    : 'Atribui o(s) bloco(s) livre(s) ao membro. Só o ADM confirma com a senha.'
+          }
+          confirmLabel="Confirmar com senha do ADM"
+          adminHint={adminCredentialHint()}
+          busy={sensitiveBusy}
+          error={sensitiveError}
+          danger={sensitiveOp.type === 'removerMembro' || sensitiveOp.type === 'removerEvento'}
+          onCancel={closeSensitiveOp}
+          onConfirm={(pwd) => void confirmSensitiveOp(pwd)}
+        />
       )}
 
       {wipeOpen && (

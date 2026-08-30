@@ -774,9 +774,68 @@ tbody tr.sale-cancelled:hover > td {
 }
 
 .member-brief-total {
-  margin: 0 0 0.35rem !important;
+  display: grid;
+  gap: 0.15rem;
+  margin: 0.45rem 0 0 !important;
   color: var(--ink) !important;
-  font-size: 0.82rem !important;
+  font-size: 0.88rem !important;
+}
+
+.member-brief-total strong {
+  font-family: 'Fraunces', Georgia, serif;
+  font-size: 1.35rem;
+  line-height: 1.15;
+}
+
+.other-blocks {
+  margin-top: 0.7rem;
+  padding-top: 0.55rem;
+  border-top: 1px solid var(--line);
+}
+
+.other-blocks > .hint {
+  margin: 0 0 0.35rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.other-blocks-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.other-block-chip {
+  display: grid;
+  justify-items: start;
+  gap: 0.05rem;
+  min-width: 72px;
+  padding: 0.28rem 0.42rem 0.3rem;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.8);
+  color: inherit;
+  font: inherit;
+  line-height: 1.15;
+  text-align: left;
+  cursor: pointer;
+}
+
+.other-block-chip strong {
+  font-size: 0.68rem;
+}
+
+.other-block-chip span {
+  font-size: 0.62rem;
+  color: var(--muted);
+}
+
+.other-block-chip.has-open {
+  background: linear-gradient(160deg, rgba(37, 99, 235, 0.14), rgba(255, 255, 255, 0.9));
+}
+
+.other-block-chip.sold-out {
+  background: linear-gradient(160deg, rgba(180, 35, 24, 0.14), rgba(255, 255, 255, 0.9));
 }
 
 .app-motto {

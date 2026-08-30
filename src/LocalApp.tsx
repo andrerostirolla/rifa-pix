@@ -45,7 +45,7 @@ type AdminTab =
   | 'amortizacao'
   | 'relatorios'
   | 'auditoria'
-type MemberTab = 'blocos' | 'vendas'
+type MemberTab = 'blocos' | 'vendas' | 'lista-vendas' | 'lista-pix'
 
 type SensitiveOp =
   | { type: 'liberar'; blockId: string; memberId: string }
@@ -169,6 +169,19 @@ function isCashPending(s: {
     !s.cashSettledAt &&
     !s.cancelledAt
   )
+}
+
+function isPixToReview(
+  s: { id: string; paymentMethod: string; status: PaymentStatus; cancelledAt?: string; cancelReason?: string },
+  charges: PixCharge[],
+) {
+  if (s.paymentMethod !== 'pix') return false
+  const charge = charges.find((c) => c.saleId === s.id)
+  const waiting = !s.cancelledAt && s.status === 'pendente' && !isPixChargeExpired(charge)
+  const expired =
+    s.cancelReason === 'expirado' ||
+    (!s.cancelledAt && s.status === 'pendente' && isPixChargeExpired(charge))
+  return waiting || expired
 }
 
 function saleUiStatus(
@@ -347,27 +360,26 @@ export default function LocalApp() {
   }, [isAdmin, sales, memberId])
 
   const memberHomeBriefs = useMemo(() => {
-    const last5 = [...visibleSales].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 5)
-    const pixReview = visibleSales
-      .filter((s) => {
-        if (s.paymentMethod !== 'pix') return false
-        const charge = pixCharges.find((c) => c.saleId === s.id)
-        const waiting = !s.cancelledAt && s.status === 'pendente' && !isPixChargeExpired(charge)
-        const expired =
-          s.cancelReason === 'expirado' ||
-          (!s.cancelledAt && s.status === 'pendente' && isPixChargeExpired(charge))
-        return waiting || expired
-      })
+    const lastAll = [...visibleSales].sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    const pixAll = visibleSales
+      .filter((s) => isPixToReview(s, pixCharges))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-      .slice(0, 8)
     const cashDue = visibleSales.filter(isCashPending)
     return {
-      last5,
-      pixReview,
-      cashDue,
+      lastPreview: lastAll.slice(0, 2),
+      lastAll,
+      pixPreview: pixAll.slice(0, 2),
+      pixAll,
+      cashCount: cashDue.length,
       cashTotal: cashDue.reduce((sum, s) => sum + s.totalAmount, 0),
     }
   }, [visibleSales, pixCharges])
+
+  const openMemberList = (tab: 'lista-vendas' | 'lista-pix') => {
+    setOpenBlockId(null)
+    setSelectedNumbers([])
+    setMemberTab(tab)
+  }
 
   /** Vendas que valem dinheiro — canceladas ficam só no histórico da lista. */
   const activeSales = useMemo(() => sales.filter((s) => !s.cancelledAt), [sales])
@@ -1702,7 +1714,7 @@ export default function LocalApp() {
                           ? memberTab === 'blocos' && !openBlock
                             ? 'active'
                             : ''
-                          : memberTab === id || (id === 'vendas' && openBlock)
+                          : memberTab === 'vendas' || (id === 'vendas' && openBlock)
                             ? 'active'
                             : ''
                       }
@@ -1713,7 +1725,7 @@ export default function LocalApp() {
                           setMemberTab('blocos')
                           return
                         }
-                        setMemberTab(id)
+                        setMemberTab('vendas')
                       }}
                     >
                       <span className="nav-label-full">{full}</span>
@@ -1766,17 +1778,19 @@ export default function LocalApp() {
           <section className="member-brief">
             <div className="member-brief-head">
               <h3>Últimas vendas</h3>
-              <button type="button" className="btn btn-ghost btn-mini" onClick={() => setMemberTab('vendas')}>
-                Ver todas
-              </button>
+              {memberHomeBriefs.lastAll.length > 2 && (
+                <button type="button" className="btn btn-ghost btn-mini" onClick={() => openMemberList('lista-vendas')}>
+                  Ver todas
+                </button>
+              )}
             </div>
-            {memberHomeBriefs.last5.length === 0 ? (
+            {memberHomeBriefs.lastPreview.length === 0 ? (
               <p>Nenhuma venda ainda.</p>
             ) : (
               <ul>
-                {memberHomeBriefs.last5.map((s) => (
+                {memberHomeBriefs.lastPreview.map((s) => (
                   <li key={s.id}>
-                    <button type="button" className="member-brief-row" onClick={() => setMemberTab('vendas')}>
+                    <button type="button" className="member-brief-row" onClick={() => openMemberList('lista-vendas')}>
                       <b>{s.buyerName}</b>
                       <span>
                         {s.cancelledAt ? 'Cancelada · ' : ''}
@@ -1792,15 +1806,22 @@ export default function LocalApp() {
             )}
           </section>
           <section className="member-brief member-brief-pix">
-            <h3>PIX a revisar</h3>
+            <div className="member-brief-head">
+              <h3>PIX a revisar</h3>
+              {memberHomeBriefs.pixAll.length > 2 && (
+                <button type="button" className="btn btn-ghost btn-mini" onClick={() => openMemberList('lista-pix')}>
+                  Ver todos
+                </button>
+              )}
+            </div>
             <p className="member-brief-hint">
               Aguardando pagamento ou cancelado por tempo — confira se o copia e cola foi enviado.
             </p>
-            {memberHomeBriefs.pixReview.length === 0 ? (
+            {memberHomeBriefs.pixPreview.length === 0 ? (
               <p>Nenhum PIX pendente ou expirado.</p>
             ) : (
               <ul>
-                {memberHomeBriefs.pixReview.map((s) => {
+                {memberHomeBriefs.pixPreview.map((s) => {
                   const charge = pixCharges.find((c) => c.saleId === s.id)
                   const expired = s.cancelReason === 'expirado' || isPixChargeExpired(charge)
                   const waiting = !expired && !s.cancelledAt && s.status === 'pendente'
@@ -1831,24 +1852,13 @@ export default function LocalApp() {
           <section className="member-brief member-brief-cash">
             <h3>Dinheiro a prestar</h3>
             <p className="member-brief-hint">Vendas em espécie ainda sem baixa da tesouraria.</p>
-            {memberHomeBriefs.cashDue.length === 0 ? (
+            {memberHomeBriefs.cashCount === 0 ? (
               <p>Nada a prestar no momento.</p>
             ) : (
-              <>
-                <p className="member-brief-total">
-                  {memberHomeBriefs.cashDue.length} venda{memberHomeBriefs.cashDue.length === 1 ? '' : 's'} ·{' '}
-                  <b>{brl(memberHomeBriefs.cashTotal)}</b>
-                </p>
-                <ul>
-                  {memberHomeBriefs.cashDue.slice(0, 5).map((s) => (
-                    <li key={s.id}>
-                      <b>{s.buyerName}</b>
-                      <span>{brl(s.totalAmount)}</span>
-                      <small>{formatNumbers(s.numbers)}</small>
-                    </li>
-                  ))}
-                </ul>
-              </>
+              <p className="member-brief-total">
+                {memberHomeBriefs.cashCount} venda{memberHomeBriefs.cashCount === 1 ? '' : 's'}
+                <strong>{brl(memberHomeBriefs.cashTotal)}</strong>
+              </p>
             )}
           </section>
         </div>
@@ -2060,6 +2070,36 @@ export default function LocalApp() {
                           : `Salvar venda (${selectedNumbers.length} nº · ${brl(selectedNumbers.length * (activeRaffles.find((r) => r.id === currentRaffleId)?.ticketPrice || 0))})`}
                   </button>
                 </div>
+                {myBlocks.filter((b) => b.id !== openBlock.id).length > 0 && (
+                  <div className="other-blocks">
+                    <p className="hint">Outros blocos</p>
+                    <div className="other-blocks-grid">
+                      {myBlocks
+                        .filter((b) => b.id !== openBlock.id)
+                        .map((b) => {
+                          const st = blockStats(b.id)
+                          const soldOut = st.open === 0
+                          return (
+                            <button
+                              key={b.id}
+                              type="button"
+                              className={`other-block-chip ${soldOut ? 'sold-out' : 'has-open'}`}
+                              onClick={() => {
+                                setOpenBlockId(b.id)
+                                setSelectedNumbers([])
+                                setMemberTab('vendas')
+                              }}
+                            >
+                              <strong>{b.label}</strong>
+                              <span>
+                                {st.open} ab.
+                              </span>
+                            </button>
+                          )
+                        })}
+                    </div>
+                  </div>
+                )}
               </>
             )}
           </form>
@@ -2068,6 +2108,11 @@ export default function LocalApp() {
               <div>
                 <h2>Minhas vendas</h2>
               </div>
+              {memberHomeBriefs.lastAll.length > 2 && (
+                <button type="button" className="btn btn-ghost btn-mini" onClick={() => openMemberList('lista-vendas')}>
+                  Ver todas
+                </button>
+              )}
             </div>
             <div className="table-wrap">
               <table>
@@ -2080,7 +2125,7 @@ export default function LocalApp() {
                   </tr>
                 </thead>
                 <tbody>
-                  {visibleSales.map((s) => {
+                  {memberHomeBriefs.lastPreview.map((s) => {
                     const charge = pixCharges.find((c) => c.saleId === s.id)
                     const cancelled = Boolean(s.cancelledAt)
                     const waitingPix =
@@ -2175,6 +2220,130 @@ export default function LocalApp() {
                 </tbody>
               </table>
             </div>
+          </div>
+        </section>
+      )}
+
+      {!isAdmin && (memberTab === 'lista-vendas' || memberTab === 'lista-pix') && (
+        <section className="panel">
+          <div className="panel-head">
+            <div>
+              <h2>{memberTab === 'lista-pix' ? 'PIX a revisar' : 'Minhas vendas'}</h2>
+              <p>
+                {memberTab === 'lista-pix'
+                  ? 'Somente PIX aguardando pagamento ou cancelado por tempo.'
+                  : 'Todas as suas vendas, da mais recente para a mais antiga.'}
+              </p>
+            </div>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => {
+                setOpenBlockId(null)
+                setSelectedNumbers([])
+                setMemberTab('blocos')
+              }}
+            >
+              Voltar
+            </button>
+          </div>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Comprador</th>
+                  <th>Números</th>
+                  <th>Recebimento</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(memberTab === 'lista-pix' ? memberHomeBriefs.pixAll : memberHomeBriefs.lastAll).map((s) => {
+                  const charge = pixCharges.find((c) => c.saleId === s.id)
+                  const cancelled = Boolean(s.cancelledAt)
+                  const waitingPix =
+                    !cancelled &&
+                    s.paymentMethod === 'pix' &&
+                    s.status === 'pendente' &&
+                    !isPixChargeExpired(charge)
+                  const canReopen = waitingPix && Boolean(charge?.copyPaste || charge?.qrCode)
+                  const pixVencido =
+                    !cancelled &&
+                    s.paymentMethod === 'pix' &&
+                    s.status === 'pendente' &&
+                    isPixChargeExpired(charge)
+                  return (
+                    <tr key={s.id} className={cancelled ? 'sale-cancelled' : undefined}>
+                      <td>{s.buyerName}</td>
+                      <td>{formatNumbers(s.numbers)}</td>
+                      <td>
+                        {s.paymentMethod === 'dinheiro'
+                          ? 'Dinheiro (com você · prestar contas)'
+                          : 'PIX (conta da loja)'}
+                        <div className="hint">
+                          {brl(s.totalAmount)}
+                          {charge?.txid ? (
+                            <>
+                              <br />
+                              TXID: <code>{charge.txid}</code>
+                            </>
+                          ) : null}
+                          {waitingPix ? (
+                            <>
+                              <br />
+                              <span className="pix-pending-hint">Aguardando pagamento…</span>
+                            </>
+                          ) : pixVencido ? (
+                            <>
+                              <br />
+                              <span className="pix-pending-hint">Prazo do PIX venceu — números liberados</span>
+                            </>
+                          ) : null}
+                        </div>
+                      </td>
+                      <td>
+                        {waitingPix ? (
+                          <div className="sale-status-actions">
+                            <button
+                              type="button"
+                              className="badge badge-action falha"
+                              onClick={() => (canReopen ? reopenPixCharge(s.id) : undefined)}
+                              disabled={!canReopen}
+                            >
+                              Aguardando PIX
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-mini"
+                              onClick={() => askCancelReason(s.id, false)}
+                            >
+                              Cancelar
+                            </button>
+                          </div>
+                        ) : cancelled ? (
+                          <div className="sale-status-actions">
+                            <span className="badge falha">{cancelInfo(s, charge)?.label}</span>
+                            <InfoPopover
+                              label="Ver motivo"
+                              title={cancelInfo(s, charge)?.label || 'Cancelamento'}
+                              tone="falha"
+                              lines={[
+                                cancelInfo(s, charge)?.reason,
+                                `Em ${new Date(s.cancelledAt as string).toLocaleString('pt-BR')}`,
+                              ]}
+                            />
+                          </div>
+                        ) : pixVencido ? (
+                          <span className="badge falha">Pagamento expirado</span>
+                        ) : (
+                          <span className={`badge ${s.status}`}>{statusLabel[s.status]}</span>
+                        )}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
           </div>
         </section>
       )}

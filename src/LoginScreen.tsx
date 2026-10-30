@@ -19,11 +19,13 @@ import {
   unlockWithBiometrics,
 } from './lib/biometrics'
 import {
+  checkMemberPinHash,
   emptyishState,
   ensureOwnerWorkspace,
   loadCloudSession,
   openAsMember,
   peekMembers,
+  rememberMemberPinHash,
   saveCloudSession,
   saveOwnerWorkspaceState,
 } from './lib/workspace'
@@ -202,6 +204,7 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
   const finishMemberLogin = async (code: string, selectedId: string, usedPin: string, memberName: string) => {
     try {
       const opened = await openAsMember(code, selectedId, usedPin)
+      await rememberMemberPinHash(code, opened.memberId, usedPin)
       importSnapshot(opened.state)
       saveCloudSession({
         role: 'member',
@@ -214,7 +217,10 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
       if (!isNetworkError(err)) throw err
       const local = useStore.getState().members.find((m) => m.id === selectedId && m.active)
       if (!local) throw new Error('Sem rede e este aparelho ainda não tem os dados da equipe. Entre uma vez com internet.')
-      if (local.pin.trim() !== usedPin.trim()) throw new Error('PIN incorreto.')
+      const pinOk =
+        (await checkMemberPinHash(code, selectedId, usedPin)) ||
+        (!!local.pin && local.pin.trim() === usedPin.trim())
+      if (!pinOk) throw new Error('PIN incorreto.')
       const last = loadCloudSession()
       saveCloudSession({
         role: 'member',

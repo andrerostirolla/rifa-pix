@@ -14,6 +14,7 @@ export type CloudSession =
   | { role: 'member'; workspace: WorkspaceMeta; memberId: string; memberName: string }
 
 const CLOUD_SESSION_KEY = 'rifa-pix-cloud-session-v1'
+const MEMBER_PIN_HASH_KEY = 'rifa-pix-member-pin-hash-v1'
 
 function client() {
   if (!supabase) throw new Error('Supabase não configurado')
@@ -53,6 +54,30 @@ export function syncCloudSessionMeta(meta: Partial<WorkspaceMeta> & { updatedAt?
   session.workspace = { ...session.workspace, ...meta }
   saveCloudSession(session)
   return session
+}
+
+async function pinHash(code: string, memberId: string, pin: string) {
+  const bytes = new TextEncoder().encode(`${code.trim().toUpperCase()}|${memberId}|${pin.trim()}`)
+  const digest = await crypto.subtle.digest('SHA-256', bytes)
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+/** O servidor não manda mais os PINs; guarda só o hash do próprio PIN para entrar sem rede. */
+export async function rememberMemberPinHash(code: string, memberId: string, pin: string) {
+  try {
+    localStorage.setItem(MEMBER_PIN_HASH_KEY, await pinHash(code, memberId, pin))
+  } catch {
+    /* sem storage: login offline fica indisponível */
+  }
+}
+
+export async function checkMemberPinHash(code: string, memberId: string, pin: string): Promise<boolean> {
+  try {
+    const saved = localStorage.getItem(MEMBER_PIN_HASH_KEY)
+    return !!saved && saved === (await pinHash(code, memberId, pin))
+  } catch {
+    return false
+  }
 }
 
 function mapWorkspace(row: {

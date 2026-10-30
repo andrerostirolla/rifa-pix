@@ -114,6 +114,7 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
   const sessionRef = useRef<CloudSession | null>(loadCloudSession())
   const updatedAtRef = useRef(sessionRef.current?.workspace.updatedAt || '')
   const savingRef = useRef(false)
+  const softRetriesRef = useRef(0)
   const savingSinceRef = useRef(0)
   const pullingRef = useRef(false)
   const pullingSinceRef = useRef(0)
@@ -263,6 +264,7 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
       saveCloudSession(session)
       sessionRef.current = session
       skipPullUntilRef.current = Date.now() + 350
+      softRetriesRef.current = 0
       setStatus('sincronizado')
       setSyncError(null)
       clearPendingSalesPresentIn(snapshotFromStore().sales)
@@ -280,6 +282,18 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
           console.warn('Recuperação por pull após falha ao salvar (ADM)', pullErr)
         }
       }
+      // Erro que não é de rede (ex.: conflito com a gravação do PIX no servidor):
+      // tenta de novo em instantes em vez de jogar o membro em contingência.
+      if (!isNetworkError(err) && softRetriesRef.current < 3) {
+        softRetriesRef.current += 1
+        dirtyRef.current = true
+        setSyncError(msg)
+        window.setTimeout(() => {
+          void pushNowRef.current()
+        }, 800 * softRetriesRef.current)
+        return
+      }
+      softRetriesRef.current = 0
       setStatus('offline')
       setSyncError(msg)
       dirtyRef.current = true
@@ -474,6 +488,8 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
   reconnectNowRef.current = reconnectNow
   const pullNowRef = useRef(pullNow)
   pullNowRef.current = pullNow
+  const pushNowRef = useRef(pushNow)
+  pushNowRef.current = pushNow
 
   useEffect(() => {
     let alive = true

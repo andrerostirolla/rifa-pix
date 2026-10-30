@@ -59,6 +59,7 @@ Deno.serve(async (req) => {
       }
       return json({ error: verifyErr.message }, 401)
     }
+    if (!workspaceId) return json({ error: 'PIN inválido ou bloqueado por tentativas' }, 401)
 
     const { data: wsRow, error: wsErr } = await admin
       .from('workspaces')

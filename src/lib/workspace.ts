@@ -151,6 +151,7 @@ export async function openAsMember(
     p_pin: pin,
   })
   if (error) throw error
+  if (data && typeof data === 'object' && 'error' in data) throw new Error(String((data as { error: unknown }).error))
   const payload = data as {
     workspaceId: string
     name: string

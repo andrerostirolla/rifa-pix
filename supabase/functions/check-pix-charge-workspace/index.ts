@@ -37,6 +37,7 @@ Deno.serve(async (req) => {
       p_pin: pin,
     })
     if (verifyErr) return json({ error: verifyErr.message }, 401)
+    if (!workspaceId) return json({ error: 'PIN inválido ou bloqueado por tentativas' }, 401)
 
     const { data: wsCharge, error: chErr } = await admin
       .from('workspace_pix_charges')

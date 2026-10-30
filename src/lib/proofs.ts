@@ -52,7 +52,7 @@ export async function uploadProofBlob(input: {
   const path = `${ws}/${input.saleId}/${Date.now()}.${ext}`
   const { error } = await supabase.storage.from(BUCKET).upload(path, input.blob, {
     contentType: mime,
-    upsert: true,
+    upsert: false,
   })
   if (error) throw error
   return { path, publicUrl: proofPublicUrl(path) }

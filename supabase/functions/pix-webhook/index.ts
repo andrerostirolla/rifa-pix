@@ -1,5 +1,5 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.49.1'
-import { normalizeSicoobWebhook } from '../_shared/sicoob.ts'
+import { normalizeSicoobWebhook, sicoobGetCob } from '../_shared/sicoob.ts'
 
 const cors = {
   'Access-Control-Allow-Origin': '*',
@@ -11,6 +11,18 @@ function json(body: unknown, status = 200) {
     status,
     headers: { ...cors, 'Content-Type': 'application/json' },
   })
+}
+
+// O corpo do webhook não é confiável (a URL é pública). Com Sicoob, a baixa só
+// acontece se a própria API confirmar a cob como CONCLUIDA, e o valor vem dela.
+async function confirmSicoobAmount(txid: string): Promise<number | null> {
+  const cob = await sicoobGetCob(txid)
+  if (String(cob.status || '').toUpperCase() !== 'CONCLUIDA') return null
+  const pixArr = Array.isArray(cob.pix) ? (cob.pix as Array<{ valor?: string }>) : []
+  const total = pixArr.reduce((sum, p) => sum + Number(p?.valor || 0), 0)
+  if (total > 0) return total
+  const original = Number((cob.valor as { original?: string } | undefined)?.original || 0)
+  return original > 0 ? original : null
 }
 
 Deno.serve(async (req) => {
@@ -41,6 +53,8 @@ Deno.serve(async (req) => {
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!
     const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
     const admin = createClient(supabaseUrl, serviceKey)
+    const provider = (Deno.env.get('PIX_PROVIDER') || 'mock').toLowerCase()
+    const trusted = !!expectedSecret && gotSecret === expectedSecret
 
     const payload = (await req.json()) as Record<string, unknown>
     const events = normalizeSicoobWebhook(payload)
@@ -50,7 +64,7 @@ Deno.serve(async (req) => {
       const txid = ev.txid
       const endToEndId = ev.endToEndId || null
       const payerName = ev.payerName || 'Pagador PIX'
-      const amount = Number(ev.amount || 0)
+      let amount = Number(ev.amount || 0)
       const paidAt = String(ev.paidAt || new Date().toISOString()).slice(0, 10)
 
       if (!txid && !endToEndId) {
@@ -60,6 +74,25 @@ Deno.serve(async (req) => {
       if (!(amount > 0)) {
         results.push({ ok: false, error: 'amount inválido', txid })
         continue
+      }
+
+      if (provider === 'sicoob') {
+        if (!txid) {
+          results.push({ ok: false, error: 'sem txid, não dá para confirmar no Sicoob', endToEndId })
+          continue
+        }
+        let confirmed: number | null = null
+        try {
+          confirmed = await confirmSicoobAmount(txid)
+        } catch (e) {
+          results.push({ ok: false, error: `Sicoob: ${e instanceof Error ? e.message : String(e)}`, txid })
+          continue
+        }
+        if (confirmed === null) {
+          results.push({ ok: false, error: 'pagamento não confirmado no Sicoob', txid })
+          continue
+        }
+        amount = confirmed
       }
 
       let chargeQuery = admin.from('pix_charges').select('*').eq('status', 'pending')
@@ -91,6 +124,10 @@ Deno.serve(async (req) => {
       }
 
       if (!charge) {
+        if (!trusted) {
+          results.push({ ok: false, error: 'Cobrança não encontrada', txid })
+          continue
+        }
         const userId = String(payload.userId || '')
         if (!userId) {
           results.push({ ok: false, error: 'Cobrança não encontrada e userId ausente', txid })

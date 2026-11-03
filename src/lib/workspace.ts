@@ -1,5 +1,6 @@
 import type { AppState } from '../types'
 import { supabase } from './supabase'
+import { getStoredMemberPin } from './pixWorkspace'
 
 export type WorkspaceMeta = {
   id: string
@@ -11,7 +12,14 @@ export type WorkspaceMeta = {
 
 export type CloudSession =
   | { role: 'admin'; workspace: WorkspaceMeta }
-  | { role: 'member'; workspace: WorkspaceMeta; memberId: string; memberName: string }
+  | {
+      role: 'member'
+      workspace: WorkspaceMeta
+      memberId: string
+      memberName: string
+      /** Token de sessão do servidor (recebido ao entrar com PIN); exigido para gravar */
+      memberToken?: string
+    }
 
 const CLOUD_SESSION_KEY = 'rifa-pix-cloud-session-v1'
 const MEMBER_PIN_HASH_KEY = 'rifa-pix-member-pin-hash-v1'
@@ -168,7 +176,7 @@ export async function openAsMember(
   accessCode: string,
   memberId: string,
   pin: string,
-): Promise<{ meta: WorkspaceMeta; state: AppState; memberId: string; memberName: string }> {
+): Promise<{ meta: WorkspaceMeta; state: AppState; memberId: string; memberName: string; sessionToken?: string }> {
   const sb = client()
   const { data, error } = await sb.rpc('member_open_workspace', {
     p_code: accessCode.trim(),
@@ -184,6 +192,7 @@ export async function openAsMember(
     updatedAt: string
     state: AppState
     member: { id: string; name: string }
+    sessionToken?: string
   }
   return {
     meta: {
@@ -195,6 +204,7 @@ export async function openAsMember(
     state: payload.state,
     memberId: payload.member.id,
     memberName: payload.member.name,
+    sessionToken: payload.sessionToken,
   }
 }
 
@@ -204,13 +214,48 @@ export async function saveByAccessCode(
   expectedUpdatedAt?: string,
 ): Promise<string> {
   const sb = client()
-  const { data, error } = await sb.rpc('save_workspace_by_code', {
-    p_code: accessCode.trim(),
-    p_state: state,
-    p_expected_updated_at: expectedUpdatedAt || null,
-  })
+  const call = (memberId: string | null, token: string | null) =>
+    sb.rpc('save_workspace_by_code', {
+      p_code: accessCode.trim(),
+      p_state: state,
+      p_expected_updated_at: expectedUpdatedAt || null,
+      p_member_id: memberId,
+      p_session_token: token,
+    })
+
+  const session = loadCloudSession()
+  if (session?.role !== 'member') {
+    // ADM: o servidor reconhece pelo login
+    const { data, error } = await call(null, null)
+    if (error) throw error
+    return (data as { updatedAt: string }).updatedAt
+  }
+
+  let token = session.memberToken || (await renewMemberToken(accessCode, session.memberId))
+  let { data, error } = await call(session.memberId, token)
+  if (error && /Sessão do membro expirada/i.test(error.message || '')) {
+    token = await renewMemberToken(accessCode, session.memberId)
+    if (token) ({ data, error } = await call(session.memberId, token))
+  }
   if (error) throw error
   return (data as { updatedAt: string }).updatedAt
+}
+
+/** Pega um token novo com o PIN lembrado no aparelho (sem PIN lembrado, o membro precisa entrar de novo). */
+async function renewMemberToken(accessCode: string, memberId: string): Promise<string | null> {
+  const pin = getStoredMemberPin(memberId)
+  if (!pin) return null
+  try {
+    const opened = await openAsMember(accessCode, memberId, pin)
+    if (!opened.sessionToken) return null
+    const session = loadCloudSession()
+    if (session?.role === 'member' && session.memberId === memberId) {
+      saveCloudSession({ ...session, memberToken: opened.sessionToken })
+    }
+    return opened.sessionToken
+  } catch {
+    return null
+  }
 }
 
 export async function fetchOwnerWorkspace(

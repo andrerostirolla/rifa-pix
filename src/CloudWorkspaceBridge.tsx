@@ -558,6 +558,7 @@ export function CloudWorkspaceBridge({ mode, onReady, onError, children }: Props
               workspace: opened.meta,
               memberId: session.memberId,
               memberName: session.memberName,
+              memberToken: session.memberToken,
             }
             saveCloudSession(next)
             sessionRef.current = next

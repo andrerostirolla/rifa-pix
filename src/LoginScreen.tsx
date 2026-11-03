@@ -211,6 +211,7 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
         workspace: opened.meta,
         memberId: opened.memberId,
         memberName: opened.memberName || memberName,
+        memberToken: opened.sessionToken,
       })
       loginMemberSession(opened.memberId, opened.memberName || memberName)
     } catch (err) {
@@ -232,6 +233,8 @@ export function LoginScreen({ onLocalAuthenticated }: Props) {
         },
         memberId: local.id,
         memberName: local.name,
+        // sem rede: reaproveita o token da última sessão deste membro
+        memberToken: last?.role === 'member' && last.memberId === local.id ? last.memberToken : undefined,
       })
       loginMemberSession(local.id, local.name)
       setInfo('Entrou em contingência (sem rede). As vendas em dinheiro sobem quando a internet voltar.')
